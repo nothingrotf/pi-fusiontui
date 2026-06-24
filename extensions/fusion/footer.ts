@@ -89,7 +89,9 @@ export function installFooter(
 				const right = `${ctxSeg}${fg(theme, "dim", "  ·  ")}${costSeg}`;
 
 				if (visibleWidth(left) + 1 + visibleWidth(right) > inner) {
-					return [` ${justify(left, "", inner)} `, ` ${justify("", right, inner)} `];
+					// Second line carries usage on the left, ctx/cost on the right.
+					const topLeft = [folder, branch, statuses].filter(Boolean).join("  ");
+					return [` ${justify(topLeft, "", inner)} `, ` ${justify(usage, right, inner)} `];
 				}
 				return [` ${justify(left, right, inner)} `];
 			},

@@ -7,12 +7,13 @@ import { fg, loadColor } from "./theme";
 
 type Th = Pick<Theme, "fg">;
 
-/** Left + right justified across `width`, padding the gap. Truncates if tight. */
+/** Left + right justified across `width`. When tight, keep right, ellipsis-truncate left. */
 function justify(left: string, right: string, width: number): string {
 	const lw = visibleWidth(left);
 	const rw = visibleWidth(right);
-	if (lw + 1 + rw > width) return truncateToWidth(left || right, width, "");
-	return `${left}${" ".repeat(width - lw - rw)}${right}`;
+	if (lw + 1 + rw <= width) return `${left}${" ".repeat(width - lw - rw)}${right}`;
+	if (rw + 2 <= width) return justify(truncateToWidth(left, width - rw - 1, "…"), right, width);
+	return truncateToWidth(right || left, width, "");
 }
 
 /** ` main [!2 ↑1]` — Starship-style branch segment with nerd-font icon. */
@@ -87,6 +88,9 @@ export function installFooter(
 				const costSeg = fg(theme, "success", state.costLabel);
 				const right = `${ctxSeg}${fg(theme, "dim", "  ·  ")}${costSeg}`;
 
+				if (visibleWidth(left) + 1 + visibleWidth(right) > inner) {
+					return [` ${justify(left, "", inner)} `, ` ${justify("", right, inner)} `];
+				}
 				return [` ${justify(left, right, inner)} `];
 			},
 		};

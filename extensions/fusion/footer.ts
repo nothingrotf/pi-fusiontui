@@ -11,8 +11,10 @@ type Th = Pick<Theme, "fg">;
 function justify(left: string, right: string, width: number): string {
 	const lw = visibleWidth(left);
 	const rw = visibleWidth(right);
-	if (lw + 1 + rw <= width) return `${left}${" ".repeat(width - lw - rw)}${right}`;
-	if (rw + 2 <= width) return justify(truncateToWidth(left, width - rw - 1, "…"), right, width);
+	if (lw + 1 + rw <= width)
+		return `${left}${" ".repeat(width - lw - rw)}${right}`;
+	if (rw + 2 <= width)
+		return justify(truncateToWidth(left, width - rw - 1, "…"), right, width);
 	return truncateToWidth(right || left, width, "");
 }
 
@@ -28,10 +30,12 @@ function branchSegment(theme: Th, state: FusionState): string {
 	if (git.ahead) flags.push(`↑${git.ahead}`);
 	if (git.behind) flags.push(`↓${git.behind}`);
 	const color = git.dirty ? "warning" : "success";
-	const icon = fg(theme, color, "");         // nf-pl-branch (U+E0A0)
+	const icon = fg(theme, color, ""); // nf-pl-branch (U+E0A0)
 	const branch = fg(theme, color, git.branch);
 	const base = `${icon} ${branch}`;
-	return flags.length ? `${base} ${fg(theme, "dim", `[${flags.join(" ")}]`)}` : base;
+	return flags.length
+		? `${base} ${fg(theme, "dim", `[${flags.join(" ")}]`)}`
+		: base;
 }
 
 /** `5h 3% 3h37m   wk 12% 1d19h` — usage windows, no provider name, no bars. */
@@ -39,7 +43,11 @@ function usageSegment(theme: Th, usage: UsageSnapshot | null): string {
 	if (!usage?.windows.length) return "";
 	return usage.windows
 		.map((w: UsageWindow) => {
-			const pct = fg(theme, loadColor(w.usedPercent), `${Math.round(w.usedPercent)}%`);
+			const pct = fg(
+				theme,
+				loadColor(w.usedPercent),
+				`${Math.round(w.usedPercent)}%`,
+			);
 			const reset = w.resetsIn ? ` ${fg(theme, "dim", w.resetsIn)}` : "";
 			return `${fg(theme, "dim", w.label)} ${pct}${reset}`;
 		})
@@ -89,13 +97,16 @@ export function installFooter(
 
 				// minimal: folder + branch on the left, ctx on the right; always one line.
 				const renderMinimal = () => {
-					const left = [folder, branch].filter(Boolean).join("  ");
+					const left = [folder, branch, usage].filter(Boolean).join("  ");
 					return [` ${justify(left, ctxSeg, inner)} `];
 				};
 				if (state.mode === "minimal") return renderMinimal();
 
-				const left = [folder, branch, usage, statuses].filter(Boolean).join("  ");
-				const fitsOneLine = visibleWidth(left) + 1 + visibleWidth(right) <= inner;
+				const left = [folder, branch, usage, statuses]
+					.filter(Boolean)
+					.join("  ");
+				const fitsOneLine =
+					visibleWidth(left) + 1 + visibleWidth(right) <= inner;
 
 				// adaptive: collapse to minimal instead of wrapping onto a second line.
 				if (!fitsOneLine && state.mode === "adaptive") return renderMinimal();
@@ -103,7 +114,10 @@ export function installFooter(
 				if (!fitsOneLine) {
 					// full: second line carries usage on the left, ctx/cost on the right.
 					const topLeft = [folder, branch, statuses].filter(Boolean).join("  ");
-					return [` ${justify(topLeft, "", inner)} `, ` ${justify(usage, right, inner)} `];
+					return [
+						` ${justify(topLeft, "", inner)} `,
+						` ${justify(usage, right, inner)} `,
+					];
 				}
 				return [` ${justify(left, right, inner)} `];
 			},

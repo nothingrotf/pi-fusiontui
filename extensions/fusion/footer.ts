@@ -27,7 +27,7 @@ function branchSegment(theme: Th, state: FusionState): string {
 	if (git.ahead) flags.push(`↑${git.ahead}`);
 	if (git.behind) flags.push(`↓${git.behind}`);
 	const color = git.dirty ? "warning" : "success";
-	const icon = fg(theme, color, "");         // nf-pl-branch (U+E0A0)
+	const icon = fg(theme, color, "");         // nf-pl-branch (U+E0A0)
 	const branch = fg(theme, color, git.branch);
 	const base = `${icon} ${branch}`;
 	return flags.length ? `${base} ${fg(theme, "dim", `[${flags.join(" ")}]`)}` : base;

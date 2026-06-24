@@ -71,11 +71,14 @@ export function installFooter(
 				const state = getState();
 				const inner = Math.max(1, width - 2);
 
-				// ── LEFT:  󰝰 ~/proj   main [!2]   Claude  5h 3% 3h37m   wk 12% 1d19h
+				// ── LEFT:  󰝰 ~/proj   main [!2]   5h 3% 3h37m   wk 12% 1d19h   ● 🐴 ponytail: ⚡ FULL
 				const folder = `${fg(theme, "muted", "󰝰")} ${fg(theme, "accent", formatCwd(state.cwd))}`;
 				const branch = branchSegment(theme, state);
 				const usage = usageSegment(theme, state.usage);
-				const left = [folder, branch, usage].filter(Boolean).join("  ");
+				const statuses = Array.from(footerData.getExtensionStatuses().values())
+					.filter(Boolean)
+					.join("  ");
+				const left = [folder, branch, usage, statuses].filter(Boolean).join("  ");
 
 				// ── RIGHT: ctx 42%/1.0M  ·  $3.922
 				const ctxPct = state.contextPercent;

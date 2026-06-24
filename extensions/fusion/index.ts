@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { FOOTER_MODES, type FooterMode, loadMode, nextMode, saveMode } from "./config";
 import { FusionEditor } from "./editor";
 import {
 	buildContextLabel,
@@ -16,13 +17,32 @@ const USAGE_REFRESH_MS = 5 * 60_000;
 const GIT_REFRESH_MS = 30_000;
 
 export default function (pi: ExtensionAPI) {
-	const state = createState(process.cwd());
+	const state = createState(process.cwd(), loadMode());
 	let requestRender: (() => void) | undefined;
 	let usageTimer: ReturnType<typeof setInterval> | undefined;
 	let gitTimer: ReturnType<typeof setInterval> | undefined;
 	let activeProvider: string | undefined;
 
 	const refresh = () => requestRender?.();
+
+	pi.registerCommand("fusion", {
+		description: "Set the fusiontui footer mode: full, minimal, or adaptive",
+		getArgumentCompletions: (prefix) =>
+			FOOTER_MODES.filter((m) => m.startsWith(prefix.trim().toLowerCase())).map((m) => ({
+				value: m,
+				label: m,
+			})),
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			const mode: FooterMode = (FOOTER_MODES as readonly string[]).includes(arg)
+				? (arg as FooterMode)
+				: nextMode(state.mode);
+			state.mode = mode;
+			saveMode(mode);
+			refresh();
+			ctx.ui.notify(`fusiontui footer mode: ${mode}`, "info");
+		},
+	});
 
 	/** Cheap, synchronous state derived from ctx (model, effort, context, cost). */
 	const syncInteractive = (ctx: ExtensionContext) => {

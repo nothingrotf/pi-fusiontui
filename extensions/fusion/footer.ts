@@ -79,7 +79,6 @@ export function installFooter(
 				const statuses = Array.from(footerData.getExtensionStatuses().values())
 					.filter(Boolean)
 					.join("  ");
-				const left = [folder, branch, usage, statuses].filter(Boolean).join("  ");
 
 				// ── RIGHT: ctx 42%/1.0M  ·  $3.922
 				const ctxPct = state.contextPercent;
@@ -88,8 +87,21 @@ export function installFooter(
 				const costSeg = fg(theme, "success", state.costLabel);
 				const right = `${ctxSeg}${fg(theme, "dim", "  ·  ")}${costSeg}`;
 
-				if (visibleWidth(left) + 1 + visibleWidth(right) > inner) {
-					// Second line carries usage on the left, ctx/cost on the right.
+				// minimal: folder + branch on the left, ctx on the right; always one line.
+				const renderMinimal = () => {
+					const left = [folder, branch].filter(Boolean).join("  ");
+					return [` ${justify(left, ctxSeg, inner)} `];
+				};
+				if (state.mode === "minimal") return renderMinimal();
+
+				const left = [folder, branch, usage, statuses].filter(Boolean).join("  ");
+				const fitsOneLine = visibleWidth(left) + 1 + visibleWidth(right) <= inner;
+
+				// adaptive: collapse to minimal instead of wrapping onto a second line.
+				if (!fitsOneLine && state.mode === "adaptive") return renderMinimal();
+
+				if (!fitsOneLine) {
+					// full: second line carries usage on the left, ctx/cost on the right.
 					const topLeft = [folder, branch, statuses].filter(Boolean).join("  ");
 					return [` ${justify(topLeft, "", inner)} `, ` ${justify(usage, right, inner)} `];
 				}

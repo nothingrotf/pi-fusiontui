@@ -16,6 +16,17 @@ It shows everything in one place:
 | 5h usage + reset | footer line 2         | `GET api.anthropic.com/api/oauth/usage` `five_hour`|
 | week usage + reset | footer line 2       | same endpoint, `seven_day`                         |
 
+## Footer modes
+
+Run `/fusion <mode>` to switch the footer layout (bare `/fusion` cycles). The
+choice persists across sessions in `~/.pi/fusiontui.json`.
+
+| Mode       | Shows                                                         |
+| ---------- | ------------------------------------------------------------ |
+| `full`     | everything; wraps to a second line when the terminal is tight (default) |
+| `minimal`  | folder + branch on the left, `ctx` on the right; always one line |
+| `adaptive` | renders `full`, but collapses to `minimal` instead of wrapping to two lines |
+
 ## Layout
 
 ```
@@ -62,6 +73,7 @@ that switch (see `@ogulcancelik/pi-minimal-footer` for Copilot/Gemini/Kimi/MiniM
 | `usage.ts`    | Subscription 5h/weekly usage fetchers (Anthropic, Codex)         |
 | `format.ts`   | Token/cost/model/effort/reset formatters                        |
 | `theme.ts`    | Safe `theme.fg` + colored progress bars                         |
+| `config.ts`   | Footer mode (`full`/`minimal`/`adaptive`) + persistence         |
 
 Key Pi extension APIs used:
 

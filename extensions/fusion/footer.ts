@@ -38,6 +38,23 @@ function branchSegment(theme: Th, state: FusionState): string {
 		: base;
 }
 
+// pi-codex-goal publishes its status under this setStatus() key.
+// ponytail: coupled to that one extension's key; generalize only if a second
+// status-publishing extension needs first-class footer placement.
+const GOAL_STATUS_KEY = "codex-goal";
+
+/** ⚑ goal from pi-codex-goal (`ctx.ui.setStatus("codex-goal", …)`). Shown in every mode. */
+function goalSegment(theme: Th, statuses: ReadonlyMap<string, string>): string {
+	const text = statuses.get(GOAL_STATUS_KEY)?.trim();
+	if (!text) return "";
+	const color = /achieved|complete/i.test(text)
+		? "success"
+		: /unmet|abandoned|paused|attention/i.test(text)
+			? "warning"
+			: "accent";
+	return `${fg(theme, color, "⚑")} ${fg(theme, "muted", text)}`;
+}
+
 /** `5h 3% 3h37m   wk 12% 1d19h` — usage windows, no provider name, no bars. */
 function usageSegment(theme: Th, usage: UsageSnapshot | null): string {
 	if (!usage?.windows.length) return "";
@@ -84,8 +101,12 @@ export function installFooter(
 				const folder = `${fg(theme, "muted", "󰝰")} ${fg(theme, "accent", formatCwd(state.cwd))}`;
 				const branch = branchSegment(theme, state);
 				const usage = usageSegment(theme, state.usage);
-				const statuses = Array.from(footerData.getExtensionStatuses().values())
-					.filter(Boolean)
+				const extStatuses: ReadonlyMap<string, string> =
+					footerData.getExtensionStatuses();
+				const goal = goalSegment(theme, extStatuses);
+				const statuses = Array.from(extStatuses.entries())
+					.filter(([key, text]) => key !== GOAL_STATUS_KEY && text)
+					.map(([, text]) => text)
 					.join("  ");
 
 				// ── RIGHT: ctx 42%/1.0M  ·  $3.922
@@ -95,10 +116,13 @@ export function installFooter(
 				const costSeg = fg(theme, "success", state.costLabel);
 				const right = `${ctxSeg}${fg(theme, "dim", "  ·  ")}${costSeg}`;
 
+				// goal gets its own line below — the info row is already crowded.
+				const goalLine = goal ? [` ${justify(goal, "", inner)} `] : [];
+
 				// minimal: folder + branch on the left, ctx on the right; always one line.
 				const renderMinimal = () => {
 					const left = [folder, branch, usage].filter(Boolean).join("  ");
-					return [` ${justify(left, ctxSeg, inner)} `];
+					return [` ${justify(left, ctxSeg, inner)} `, ...goalLine];
 				};
 				if (state.mode === "minimal") return renderMinimal();
 
@@ -117,9 +141,10 @@ export function installFooter(
 					return [
 						` ${justify(topLeft, "", inner)} `,
 						` ${justify(usage, right, inner)} `,
+						...goalLine,
 					];
 				}
-				return [` ${justify(left, right, inner)} `];
+				return [` ${justify(left, right, inner)} `, ...goalLine];
 			},
 		};
 	});

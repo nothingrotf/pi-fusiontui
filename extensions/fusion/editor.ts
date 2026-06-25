@@ -29,10 +29,18 @@ function effortColor(label: string): string {
 const stripAnsi = (s: string): string =>
 	s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
 
-/** A horizontal rule line drawn by the base editor (all ─ / dashes). */
+/**
+ * A border line drawn by the base editor. Two shapes:
+ *  - a plain horizontal rule, all `─` / dashes; or
+ *  - a scroll-indicator border when the input scrolls past ~30% of the
+ *    terminal height: `─── ↑ 3 more ───` (top) / `─── ↓ 5 more ───` (bottom).
+ * Missing the scroll variant made long pastes slice out the typed text
+ * (the box picked the bottom rule as its top), blanking the editor.
+ */
 const isRule = (line: string): boolean => {
 	const t = stripAnsi(line).trim();
-	return t.length >= 3 && /^[─-]+$/.test(t);
+	if (t.length < 3) return false;
+	return /^[─-]+$/.test(t) || /^─+ ?[↑↓] ?\d+ more/.test(t);
 };
 
 /** Truncate to `w`, then pad with spaces to exactly `w` visible columns. */

@@ -27,6 +27,42 @@ choice persists across sessions in `~/.pi/fusiontui.json`.
 | `minimal`  | folder + branch on the left, `ctx` on the right; always one line |
 | `adaptive` | renders `full`, but collapses to `minimal` instead of wrapping to two lines |
 
+## Sound notifications
+
+A short sound plays when the agent finishes its turn (control returns to you) —
+ported faithfully from Droid's notification engine. Two sounds are bundled
+(extracted from Droid): **FX-OK01** (soft success bloop, default) and **FX-ACK01**
+(tactile ripple). Settings persist in `~/.pi/fusiontui.json`.
+
+```bash
+/fusion-sound                 # interactive picker
+/fusion-sound fx-ack01        # set the completion sound (previews it)
+/fusion-sound bell            # classic terminal bell (BEL)
+/fusion-sound off             # disable
+/fusion-sound /path/to.wav    # custom sound file
+/fusion-sound focus unfocused # only ping when you're away from the terminal
+/fusion-sound test            # preview the current sound
+```
+
+| Setting | Values | Default |
+| ------- | ------ | ------- |
+| `completionSound` | `off` \| `bell` \| `fx-ok01` \| `fx-ack01` \| `/abs/path.wav` | `fx-ok01` |
+| `soundFocusMode`  | `always` \| `focused` \| `unfocused` | `always` |
+
+**How it works (macOS-first, cross-platform).** Playback shells out to the OS
+audio player with a 2s timeout, degrading to the terminal bell on any failure:
+
+| OS | Player |
+| -- | ------ |
+| macOS | `afplay` |
+| Linux | `paplay` → `aplay -q` → `ffplay` (first found) |
+| Windows | PowerShell `Media.SoundPlayer` |
+
+`soundFocusMode` uses terminal focus-reporting (`\x1b[?1004h`): `unfocused` only
+plays when you've tabbed away — enabled lazily and torn down on exit. On macOS
+this works out of the box (`afplay` ships with the OS; iTerm2 / Terminal.app /
+kitty / WezTerm all support focus reporting).
+
 ## Layout
 
 ```

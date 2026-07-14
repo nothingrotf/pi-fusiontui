@@ -117,8 +117,13 @@ palette, and the verbatim `toolDisplay.*` strings):
   definitions** (`createReadToolDefinition` & co., exported by Pi).
   Registration happens at `session_start`, and any name already owned by
   another extension (e.g. `pi-diff`'s edit/write, `pi-fff`'s grep/find) is
-  **skipped with a notice** — that extension keeps both its behavior and its
-  rendering, and no load-time conflict occurs.
+  **skipped with a notice** — that extension keeps its execution behavior and
+  no load-time conflict occurs; the transcript skin still applies its deliberate
+  global Droid presentation policy to the resulting card.
+* **Skin precedence** — Fusion intentionally owns the transcript presentation:
+  custom/MCP tool renderers are normalized to the Droid fallback card, while
+  same-name execution definitions owned by other extensions are never replaced.
+  This is a product decision, not an interoperability fallback.
 * **User messages** — Droid's prompt block: a 1-column `#d75f00` gutter bar +
   the message on a `#262626` block with text starting at column 3, no vertical
   padding (patches `UserMessageComponent.prototype.render`, OSC 133 prompt
@@ -197,7 +202,7 @@ that switch (see `@ogulcancelik/pi-minimal-footer` for Copilot/Gemini/Kimi/MiniM
 | ------------- | ---------------------------------------------------------------- |
 | `index.ts`    | Wires events → state → `setFooter` / `setEditorComponent`        |
 | `state.ts`    | Mutable `FusionState` the renderers read from                    |
-| `footer.ts`   | `ctx.ui.setFooter` component (2 lines: info + usage bars)        |
+| `footer.ts`   | `ctx.ui.setFooter` component (stable one-line adaptive/minimal or two-line full) |
 | `editor.ts`   | `CustomEditor` subclass: state-colored bubble + `model (effort)` row |
 | `droid.ts`    | Droid transcript skin: tool-card overrides + assistant icon + palette |
 | `git.ts`      | `git status --porcelain=2 --branch` parser                      |

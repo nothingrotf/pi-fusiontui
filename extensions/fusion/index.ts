@@ -1,7 +1,9 @@
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import {
 	FOOTER_MODES,
 	type FooterMode,
@@ -16,12 +18,14 @@ import {
 	BUILTIN_SOUNDS,
 	FOCUS_META,
 	FocusTracker,
+	normalizeSoundValue,
 	SOUND_FOCUS_MODES,
 	SOUND_META,
 	type SoundFocusMode,
 	type SoundValue,
 	playSound,
 	previewSound,
+	stopSoundPlayback,
 } from "./sound";
 import { FusionEditor } from "./editor";
 import {
@@ -37,16 +41,22 @@ import {
 	patchAssistantIcon,
 	patchToolFallbacks,
 	patchUserGutter,
+	resetDroidSession,
 	setPaletteThemeProvider,
 	stopAllShimmers,
 	unpatchAssistantIcon,
 	unpatchToolFallbacks,
 	unpatchUserGutter,
 } from "./droid";
-import { installFooter } from "./footer";
+import { installFooter, type FooterInstallHandle } from "./footer";
 import { readGitStatus } from "./git";
-import { createState } from "./state";
+import {
+	createState,
+	deriveActivity,
+	type WorkingPhase,
+} from "./state";
 import { fetchUsageForProvider } from "./usage";
+import { FocusInputParser } from "./input";
 
 const USAGE_REFRESH_MS = 5 * 60_000;
 const GIT_REFRESH_MS = 30_000;
@@ -63,16 +73,36 @@ export default function (pi: ExtensionAPI) {
 	const state = createState(process.cwd(), loadMode());
 	let droidToolsInstalled = false;
 	let fusionEditor: FusionEditor | undefined;
+	let fusionEditorFactory:
+		| ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => FusionEditor)
+		| undefined;
+	let footerHandle: FooterInstallHandle | undefined;
+	let footerToken: symbol | undefined;
 	let requestRender: ((force?: boolean) => void) | undefined;
 	// Scroll-safe viewport resync (repaints the visible screen only, no \x1b[3J).
 	let resyncFn: (() => void) | undefined;
 	// True when pi-tui's frame is taller than the viewport — i.e. rows have
 	// scrolled into terminal scrollback, where a viewport resync can't reach them.
-	let frameOverflowsFn: (() => boolean) | undefined;
-	let usageTimer: ReturnType<typeof setInterval> | undefined;
+	let frameOverflowsFn: (() => boolean | undefined) | undefined;
+	let usageTimer: ReturnType<typeof setTimeout> | undefined;
+	let usageKickTimer: ReturnType<typeof setTimeout> | undefined;
 	let gitTimer: ReturnType<typeof setInterval> | undefined;
 	let healTimer: ReturnType<typeof setInterval> | undefined;
 	let activeProvider: string | undefined;
+	let uiGeneration = 0;
+	let uiActive = false;
+	let usageGeneration = 0;
+	let usageWork:
+		| { generation: number; life: number; provider: string; controller: AbortController }
+		| undefined;
+	let gitGeneration = 0;
+	let gitInFlight:
+		| { generation: number; life: number; cwd: string }
+		| undefined;
+	let gitQueued:
+		| { generation: number; life: number; cwd: string }
+		| undefined;
+	const isLive = (life: number): boolean => uiActive && life === uiGeneration;
 
 	// ── Sound notifications ──────────────────────────────────────────────
 	// Note on subagents: Droid silences subagent sounds via getDepth(); Pi
@@ -83,6 +113,7 @@ export default function (pi: ExtensionAPI) {
 		"completionSound" | "awaitingInputSound" | "soundFocusMode"
 	> = loadConfig();
 	const focus = new FocusTracker();
+	const focusInputParser = new FocusInputParser((focused) => focus.setFocused(focused));
 	let unsubscribeInput: (() => void) | undefined;
 
 	/** Enable/disable terminal focus reporting based on the current focus policy. */
@@ -129,6 +160,12 @@ export default function (pi: ExtensionAPI) {
 		scrubPending = false;
 		refreshFull();
 	};
+	const consumePendingScrub = (ctx: ExtensionContext) => {
+		if (!scrubPending || !ctx.hasUI || ctx.mode !== "tui") return;
+		if (!ctx.isIdle() || ctx.ui.getEditorText().length > 0) return;
+		scrubPending = false;
+		refreshFull();
+	};
 
 	pi.registerCommand("fusion-sound", {
 		description:
@@ -169,10 +206,15 @@ export default function (pi: ExtensionAPI) {
 					if (!pick) return;
 					value = pick.split(" ")[0] as SoundValue;
 				}
-				sound = { ...sound, awaitingInputSound: value };
-				saveConfig({ awaitingInputSound: value });
-				if (value !== "off") void previewSound(value);
-				ctx.ui.notify(`fusiontui: awaiting-input sound = ${value}`, "info");
+				const normalized = normalizeSoundValue(value);
+				if (!normalized) {
+					ctx.ui.notify("fusiontui: invalid sound; use a known id or absolute file path", "warning");
+					return;
+				}
+				sound = { ...sound, awaitingInputSound: normalized };
+				saveConfig({ awaitingInputSound: normalized });
+				if (normalized !== "off") void previewSound(normalized);
+				ctx.ui.notify(`fusiontui: awaiting-input sound = ${normalized}`, "info");
 				return;
 			}
 
@@ -196,7 +238,11 @@ export default function (pi: ExtensionAPI) {
 
 			// `/fusion-sound <value>` → set completion sound (bare arg).
 			if (raw.length > 0) {
-				const value = raw as SoundValue;
+				const value = normalizeSoundValue(raw);
+				if (!value) {
+					ctx.ui.notify("fusiontui: invalid sound; use a known id or absolute file path", "warning");
+					return;
+				}
 				sound = { ...sound, completionSound: value };
 				saveConfig({ completionSound: value });
 				if (value !== "off") void previewSound(value);
@@ -262,53 +308,134 @@ export default function (pi: ExtensionAPI) {
 		refresh();
 	};
 
-	const refreshGit = async (ctx: ExtensionContext) => {
-		state.git = await readGitStatus(ctx.cwd);
-		refresh();
+	/** Latest-wins, single-flight Git refresh (L0-03). */
+	const drainGit = async () => {
+		while (gitQueued && uiActive) {
+			const work = gitQueued;
+			gitQueued = undefined;
+			gitInFlight = work;
+			try {
+				const result = await readGitStatus(work.cwd);
+				if (
+					isLive(work.life) &&
+					work.generation === gitGeneration &&
+					state.cwd === work.cwd
+				) {
+					state.git = result;
+					refresh();
+				}
+			} finally {
+				if (gitInFlight === work) gitInFlight = undefined;
+			}
+		}
+	};
+	const refreshGit = (ctx: ExtensionContext) => {
+		if (!uiActive) return;
+		gitQueued = { cwd: ctx.cwd, life: uiGeneration, generation: ++gitGeneration };
+		if (!gitInFlight) void drainGit();
 	};
 
 	// ── Working indicator (Droid's ‹⠋ Thinking…› ‹context: 12%› analog) ─────
-	// Rendered by FusionEditor above the composer instead of Pi's loader row:
-	// the loader can scroll into terminal scrollback mid-stream and persist
-	// (`⠋ Thinking…` lines between turns) — Droid never commits status lines.
-	let workingLabel = "Thinking...";
+	// Keep the phase and pending asks as inputs, then derive one coherent view;
+	// renderers never observe an independently-mutated label/border pair (L1-03).
+	let workingPhase: WorkingPhase | "idle" = "idle";
 	const awaitingToolIds = new Set<string>();
+	const syncActivity = () => {
+		state.activity = deriveActivity(awaitingToolIds, workingPhase);
+	};
 	const updateWorking = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
-		// Droid shows no ctx% in the live status (the footer already carries it).
-		state.workingLabel = workingLabel;
+		syncActivity();
 		refresh();
 	};
 
+	const scheduleUsageRefresh = () => {
+		if (usageTimer) clearTimeout(usageTimer);
+		usageTimer = undefined;
+		const provider = activeProvider;
+		const life = uiGeneration;
+		if (!provider || !isLive(life)) return;
+		usageTimer = setTimeout(() => {
+			usageTimer = undefined;
+			if (isLive(life) && activeProvider === provider) refreshUsage(provider);
+		}, USAGE_REFRESH_MS);
+	};
+
+	/** Provider usage refresh with generation + abort guards (L0-04). */
 	const refreshUsage = (provider: string | undefined) => {
-		const task = fetchUsageForProvider(provider);
+		if (!uiActive) return;
+		const generation = ++usageGeneration;
+		usageWork?.controller.abort();
+		usageWork = undefined;
+		const previousProvider = activeProvider;
+		activeProvider = undefined;
+		if (provider === undefined) {
+			state.usage = null;
+			refresh();
+			return;
+		}
+		const work = {
+			provider,
+			life: uiGeneration,
+			generation,
+			controller: new AbortController(),
+		};
+		const task = fetchUsageForProvider(provider, work.controller.signal);
 		if (!task) {
 			state.usage = null;
 			refresh();
 			return;
 		}
+		usageWork = work;
 		activeProvider = provider;
-		task
+		if (previousProvider !== provider) state.usage = null;
+		void task
 			.then((snap) => {
-				if (activeProvider !== provider) return;
+				if (
+					usageWork !== work ||
+					!isLive(work.life) ||
+					work.generation !== usageGeneration ||
+					work.controller.signal.aborted ||
+					activeProvider !== provider
+				) return;
 				// Keep prior data on a transient error.
-				if (!snap.windows.length && snap.error && state.usage?.windows.length)
-					return;
+				if (!snap.windows.length && snap.error && state.usage?.windows.length) return;
 				state.usage = snap;
 				refresh();
 			})
-			.catch(() => {});
+			.catch(() => {})
+			.finally(() => {
+				if (usageWork === work) {
+					usageWork = undefined;
+					scheduleUsageRefresh();
+				}
+			});
 	};
 
 	const stopTimers = () => {
-		if (usageTimer) clearInterval(usageTimer);
+		if (usageTimer) clearTimeout(usageTimer);
+		if (usageKickTimer) clearTimeout(usageKickTimer);
 		if (gitTimer) clearInterval(gitTimer);
 		usageTimer = undefined;
+		usageKickTimer = undefined;
 		gitTimer = undefined;
+		usageWork?.controller.abort();
+		usageWork = undefined;
+		gitQueued = undefined;
+		activeProvider = undefined;
+		usageGeneration++;
+		gitGeneration++;
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
+		stopTimers();
+		resetDroidSession();
+		uiGeneration++;
+		uiActive = true;
+		workingPhase = "idle";
+		awaitingToolIds.clear();
+		syncActivity();
 
 		syncInteractive(ctx);
 		void refreshGit(ctx);
@@ -341,57 +468,67 @@ export default function (pi: ExtensionAPI) {
 				);
 		}
 
-		installFooter(ctx, () => state, {
-			setRequestRender: (fn) => {
-				requestRender = fn;
+		const ownerToken = Symbol("fusion-footer-session");
+		footerToken = ownerToken;
+		footerHandle = installFooter(ctx, () => state, {
+			setRequestRender: (fn, owner) => {
+				if (owner === footerToken) requestRender = fn;
 			},
-			setResync: (fn) => {
-				resyncFn = fn;
+			setResync: (fn, owner) => {
+				if (owner === footerToken) resyncFn = fn;
 			},
-			setFrameOverflows: (fn) => {
-				frameOverflowsFn = fn;
+			setFrameOverflows: (fn, owner) => {
+				if (owner === footerToken) frameOverflowsFn = fn;
 			},
 			onBranchChange: () => void refreshGit(ctx),
-		});
+		}, ownerToken);
 
 		// Suppress Pi's loader row — the live status renders above the composer.
 		ctx.ui.setWorkingVisible(false);
 
-		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+		fusionEditorFactory = (tui, theme, keybindings) => {
 			// interactive-mode never disposes replaced custom editors — keep the
 			// instance so shutdown can release its ticker subscription.
 			fusionEditor?.dispose();
 			fusionEditor = new FusionEditor(tui, theme, keybindings, ctx.ui.theme, () => ({
 				modelLabel: state.modelLabel,
 				effortLabel: state.effortLabel,
-				agent: state.agent,
-				workingLabel: state.workingLabel,
-			}));
+				agent: state.activity.agent,
+				workingLabel: state.activity.workingLabel,
+			}), () => ctx.ui.getEditorComponent?.() === fusionEditorFactory);
 			return fusionEditor;
-		});
+		};
+		ctx.ui.setEditorComponent(fusionEditorFactory);
 
-		refreshUsage(ctx.model?.provider);
+		// Defer auth/network work until after UI installation; all auth and body
+		// consumption is asynchronous and bounded, so the first paint stays responsive.
+		const life = uiGeneration;
+		usageKickTimer = setTimeout(() => {
+			usageKickTimer = undefined;
+			if (isLive(life)) refreshUsage(ctx.model?.provider);
+		}, 0);
 
 		// Focus tracking for focus-sensitive sound modes.
-		sound = loadConfig();
+		sound = loadConfig((field) =>
+			ctx.ui.notify(`fusiontui: invalid ${field} config; using default`, "warning"),
+		);
 		syncFocusReporting();
+		focusInputParser.reset();
 		unsubscribeInput = ctx.ui.onTerminalInput?.((data) => {
-			focus.handleInput(data);
-			// Swallow bare focus-report sequences so they never leak into the editor.
-			if (data === "\x1b[I" || data === "\x1b[O") return { consume: true };
-			return undefined;
+			const result = focusInputParser.parse(data);
+			// The editor processes input after this hook; consumePendingScrub must
+			// observe the post-submit empty editor, not the pre-input state.
+			queueMicrotask(() => consumePendingScrub(ctx));
+			return result;
 		});
 
-		stopTimers();
-		usageTimer = setInterval(
-			() => refreshUsage(activeProvider),
-			USAGE_REFRESH_MS,
-		);
-		gitTimer = setInterval(() => void refreshGit(ctx), GIT_REFRESH_MS);
+		gitTimer = setInterval(() => refreshGit(ctx), GIT_REFRESH_MS);
 	});
 
-	const onInteractive = (_e: unknown, ctx: ExtensionContext) =>
+	const onInteractive = (_e: unknown, ctx: ExtensionContext) => {
 		syncInteractive(ctx);
+		consumePendingScrub(ctx);
+	};
 	const onInteractiveAndGit = (_e: unknown, ctx: ExtensionContext) => {
 		syncInteractive(ctx);
 		void refreshGit(ctx);
@@ -407,9 +544,8 @@ export default function (pi: ExtensionAPI) {
 		scrub(ctx);
 	});
 	pi.on("agent_start", (_event, ctx) => {
-		state.agent = "working";
+		workingPhase = "thinking";
 		awaitingToolIds.clear();
-		workingLabel = "Thinking...";
 		syncInteractive(ctx);
 		updateWorking(ctx);
 		if (ctx.hasUI && ctx.mode === "tui") startHealing();
@@ -421,39 +557,30 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 	pi.on("turn_start", (_event, ctx) => {
-		workingLabel = "Thinking...";
+		workingPhase = "thinking";
 		updateWorking(ctx);
 	});
 	pi.on("message_start", (event, ctx) => {
 		if (event.message.role !== "assistant") return;
-		workingLabel = "Generating..."; // droid `status.generating`, verbatim
+		workingPhase = "generating"; // droid `status.generating`, verbatim
 		updateWorking(ctx);
 	});
 	pi.on("message_end", onInteractive);
 	pi.on("agent_end", (_event, ctx) => {
-		state.agent = "idle";
-		state.workingLabel = "";
+		workingPhase = "idle";
 		awaitingToolIds.clear();
+		syncActivity();
 		stopHealing();
 		// Aborted tools never fire tool_execution_end — latch their headers solid.
 		stopAllShimmers();
 		syncInteractive(ctx);
 		void refreshGit(ctx);
-		// The agent finished its run → control returns to you. Ding + heal the
-		// display. Which heal depends on whether this run scrolled past the
-		// viewport:
-		//  - Frame FITS the viewport → nothing reached scrollback, so the cheap
-		//    in-place viewport resync (scrollback-safe: no ED(2)/ED(3)) is enough.
-		//  - Frame OUTGREW the viewport → the differ's implicit over-viewport
-		//    scrolls can bake duplicated rows into terminal scrollback (seen on
-		//    Ghostty/iTerm2), which an in-place resync can never repair. Do the
-		//    deep clean (full clear + reprint, /fusion-redraw's path) so the
-		//    completed transcript reads clean when you scroll up. It's wrapped in
-		//    synchronized output (DEC 2026) so modern terminals show no flash, and
-		//    scrub() defers it if you're already composing the next message.
+		// requestRender() has no completion callback in pi-tui. The previous
+		// frame therefore cannot safely answer the overflow question here (L0-01).
+		// Use the conservative public recovery path after the state-shape change;
+		// scrub() coalesces/defer this while the user is composing (L0-02).
 		if (ctx.hasUI && ctx.mode === "tui") {
-			if (frameOverflowsFn?.()) scrub(ctx);
-			else resyncFn?.();
+			scrub(ctx);
 			void playSound(sound.completionSound, sound.soundFocusMode, {
 				isFocused: focus.isFocused,
 			});
@@ -463,8 +590,7 @@ export default function (pi: ExtensionAPI) {
 		if (isAskTool(event.toolName)) {
 			// Droid's awaiting-input trigger: an AskUser-style question opened.
 			awaitingToolIds.add(event.toolCallId);
-			state.agent = "awaiting";
-			workingLabel = "Waiting for your input...";
+			workingPhase = "thinking";
 			if (ctx.hasUI && ctx.mode === "tui") {
 				void playSound(sound.awaitingInputSound, sound.soundFocusMode, {
 					isFocused: focus.isFocused,
@@ -473,16 +599,15 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			// Droid `ie0` isInvokingTools branch, verbatim (" Invoking tools... ") —
 			// droid never puts the tool name in the live status row.
-			workingLabel = "Invoking tools...";
+			workingPhase = "invoking";
 		}
 		updateWorking(ctx);
 		refresh();
 	});
 	pi.on("tool_execution_end", (event, ctx) => {
 		markToolFinished(event.toolCallId);
-		if (awaitingToolIds.delete(event.toolCallId) && awaitingToolIds.size === 0)
-			state.agent = "working";
-		workingLabel = "Thinking...";
+		awaitingToolIds.delete(event.toolCallId);
+		workingPhase = "thinking";
 		updateWorking(ctx);
 		onInteractiveAndGit(event, ctx);
 	});
@@ -492,13 +617,21 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		uiActive = false;
+		uiGeneration++;
 		stopTimers();
 		stopHealing();
 		requestRender = undefined;
+		resyncFn = undefined;
+		frameOverflowsFn = undefined;
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
+		focusInputParser.reset();
 		focus.disable();
+		setPaletteThemeProvider(undefined);
+		stopSoundPlayback();
 		stopAllShimmers();
+		resetDroidSession();
 		fusionEditor?.dispose();
 		fusionEditor = undefined;
 		unpatchAssistantIcon();
@@ -506,8 +639,13 @@ export default function (pi: ExtensionAPI) {
 		unpatchToolFallbacks();
 		if (ctx.hasUI && ctx.mode === "tui") {
 			ctx.ui.setWorkingVisible(true);
-			ctx.ui.setFooter(undefined);
-			ctx.ui.setEditorComponent(undefined);
+			if (footerHandle?.isOwned()) ctx.ui.setFooter(undefined);
+			if (ctx.ui.getEditorComponent?.() === fusionEditorFactory) {
+				ctx.ui.setEditorComponent(undefined);
+			}
 		}
+		footerHandle = undefined;
+		footerToken = undefined;
+		fusionEditorFactory = undefined;
 	});
 }

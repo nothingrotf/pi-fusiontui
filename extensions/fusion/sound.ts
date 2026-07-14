@@ -12,9 +12,10 @@
  * Unlike Droid we do NOT need to extract assets from a Bun VFS — the two WAVs
  * ship on disk under ./sounds/, so playback reads them directly.
  */
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 /** Built-in sound ids (mirror Droid's `dOT` enum). */
 export const BUILTIN_SOUNDS = ["fx-ok01", "fx-ack01"] as const;
@@ -45,16 +46,40 @@ function isBuiltin(v: string): v is BuiltinSound {
 	return (BUILTIN_SOUNDS as readonly string[]).includes(v);
 }
 
+/**
+ * Central guard for persisted sound values (L1-01): only the known enum
+ * values or an absolute path to an existing playable file are accepted.
+ * Returns null for anything else so callers can fall back predictably.
+ */
+export function normalizeSoundValue(value: unknown): SoundValue | null {
+	if (typeof value !== "string" || value.length === 0) return null;
+	if (value === "off" || value === "bell" || isBuiltin(value)) return value;
+	// Custom sounds must be absolute paths to a real file.
+	const isAbsolute =
+		value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+	if (!isAbsolute) return null;
+	try {
+		return existsSync(value) && statSync(value).isFile() ? value : null;
+	} catch {
+		return null;
+	}
+}
+
 /** Resolve a built-in id to its bundled .wav path (next to this module). */
 function builtinPath(id: BuiltinSound): string {
 	return fileURLToPath(new URL(`./sounds/${id}.wav`, import.meta.url));
 }
 
 /** Whether a command exists on PATH (mirror Droid's `Ch9`). */
-function which(cmd: string): boolean {
+const execFileAsync = promisify(execFile);
+const playerCache = new Map<string, string | null>();
+
+/** Cached asynchronous PATH probe; never run once per notification (L4-11). */
+async function commandExists(cmd: string): Promise<boolean> {
 	try {
 		const probe = process.platform === "win32" ? "where" : "which";
-		return spawnSync(probe, [cmd], { stdio: "ignore", timeout: 1000 }).status === 0;
+		await execFileAsync(probe, [cmd], { timeout: 1000 });
+		return true;
 	} catch {
 		return false;
 	}
@@ -68,28 +93,46 @@ export function terminalBell(): void {
 }
 
 /** Pick the OS audio player + args for a file (mirror Droid's `iw1`). */
-function playerFor(file: string): { command: string; args: string[] } | null {
-	switch (process.platform) {
-		case "darwin":
-			return { command: "afplay", args: [file] };
-		case "linux":
-			if (which("paplay")) return { command: "paplay", args: [file] };
-			if (which("aplay")) return { command: "aplay", args: ["-q", file] };
-			if (which("ffplay")) return { command: "ffplay", args: ["-nodisp", "-autoexit", file] };
-			return null;
-		case "win32":
-			return {
-				command: "powershell",
-				args: [
-					"-NoProfile",
-					"-NonInteractive",
-					"-c",
-					`Add-Type -AssemblyName System.Windows.Forms; (New-Object Media.SoundPlayer '${file.replace(/'/g, "''")}').PlaySync()`,
-				],
-			};
-		default:
-			return null;
+async function playerFor(file: string): Promise<{ command: string; args: string[] } | null> {
+	const platform = process.platform;
+	let command = playerCache.get(platform);
+	if (command === undefined) {
+		switch (platform) {
+			case "darwin":
+				command = "afplay";
+				break;
+			case "win32":
+				command = "powershell";
+				break;
+			case "linux":
+				command = null;
+				for (const candidate of ["paplay", "aplay", "ffplay"]) {
+					if (await commandExists(candidate)) {
+						command = candidate;
+						break;
+					}
+				}
+				break;
+			default:
+				command = null;
+		}
+		playerCache.set(platform, command);
 	}
+	if (!command) return null;
+	if (command === "aplay") return { command, args: ["-q", file] };
+	if (command === "ffplay") return { command, args: ["-nodisp", "-autoexit", file] };
+	if (command === "powershell") {
+		return {
+			command,
+			args: [
+				"-NoProfile",
+				"-NonInteractive",
+				"-c",
+				`Add-Type -AssemblyName System.Windows.Forms; (New-Object Media.SoundPlayer '${file.replace(/'/g, "''")}').PlaySync()`,
+			],
+		};
+	}
+	return { command, args: [file] };
 }
 
 function isPlayableFile(p: string): boolean {
@@ -100,31 +143,48 @@ function isPlayableFile(p: string): boolean {
 	}
 }
 
+const activePlayers = new Map<ChildProcess, () => void>();
+let playbackGeneration = 0;
+
+/** Stop every child owned by this extension during teardown (L4-08). */
+export function stopSoundPlayback(): void {
+	playbackGeneration++;
+	for (const [child, settle] of activePlayers) {
+		settle();
+		try { child.kill("SIGTERM"); } catch {}
+	}
+	activePlayers.clear();
+}
+
 /** Low-level: play a resolved file path, falling back to the bell (mirror Droid's `xi0`). */
-function playFile(file: string, opts: { fallbackToBell?: boolean; timeout?: number } = {}): Promise<boolean> {
+async function playFile(file: string, opts: { fallbackToBell?: boolean; timeout?: number } = {}): Promise<boolean> {
 	const { fallbackToBell = true, timeout = 2000 } = opts;
+	const generation = playbackGeneration;
 	if (!isPlayableFile(file)) {
 		if (fallbackToBell) terminalBell();
-		return Promise.resolve(false);
+		return false;
 	}
-	const player = playerFor(file);
+	const player = await playerFor(file);
+	if (generation !== playbackGeneration) return false;
 	if (!player) {
 		if (fallbackToBell) terminalBell();
-		return Promise.resolve(false);
+		return false;
 	}
 	return new Promise((resolve) => {
-		const child = execFile(player.command, player.args, { timeout, killSignal: "SIGTERM" }, (err) => {
-			if (err) {
-				if (fallbackToBell) terminalBell();
-				resolve(false);
-			} else {
-				resolve(true);
-			}
+		let settled = false;
+		let child: ChildProcess | undefined;
+		const settle = (success: boolean, notify = true) => {
+			if (settled) return;
+			settled = true;
+			if (child) activePlayers.delete(child);
+			if (!success && notify && fallbackToBell) terminalBell();
+			resolve(success);
+		};
+		child = execFile(player.command, player.args, { timeout, killSignal: "SIGTERM" }, (err) => {
+			settle(!err);
 		});
-		child.on("error", () => {
-			if (fallbackToBell) terminalBell();
-			resolve(false);
-		});
+		activePlayers.set(child, () => settle(false, false));
+		child.on("error", () => settle(false));
 	});
 }
 
@@ -199,6 +259,10 @@ export class FocusTracker {
 			if (process.stdout.isTTY) process.stdout.write(DISABLE_FOCUS_REPORTING);
 		} catch {}
 		this.enabled = false;
+	}
+
+	setFocused(focused: boolean): void {
+		this.focused = focused;
 	}
 
 	/** Feed raw terminal input; updates focus state if a focus event is present. */

@@ -1,7 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+	normalizeSoundValue,
 	SOUND_FOCUS_MODES,
 	type SoundFocusMode,
 	type SoundValue,
@@ -51,20 +60,24 @@ function readRaw(): Record<string, unknown> {
 }
 
 /** Load the full config, filling defaults for missing/invalid fields. */
-export function loadConfig(): FusionConfig {
+export function loadConfig(onWarning?: (field: string) => void): FusionConfig {
 	const raw = readRaw();
+	const warnInvalid = (field: string) => {
+		if (Object.prototype.hasOwnProperty.call(raw, field)) onWarning?.(field);
+	};
 	const mode = isFooterMode(raw.mode) ? raw.mode : DEFAULT_CONFIG.mode;
-	const completionSound =
-		typeof raw.completionSound === "string" && raw.completionSound.length > 0
-			? (raw.completionSound as SoundValue)
-			: DEFAULT_CONFIG.completionSound;
-	const awaitingInputSound =
-		typeof raw.awaitingInputSound === "string" && raw.awaitingInputSound.length > 0
-			? (raw.awaitingInputSound as SoundValue)
-			: DEFAULT_CONFIG.awaitingInputSound;
+	if (raw.mode !== undefined && !isFooterMode(raw.mode)) warnInvalid("mode");
+	// L1-01: only known enum values / valid absolute paths pass the boundary.
+	const completionValue = normalizeSoundValue(raw.completionSound);
+	const completionSound: SoundValue = completionValue ?? DEFAULT_CONFIG.completionSound;
+	if (raw.completionSound !== undefined && !completionValue) warnInvalid("completionSound");
+	const awaitingValue = normalizeSoundValue(raw.awaitingInputSound);
+	const awaitingInputSound: SoundValue = awaitingValue ?? DEFAULT_CONFIG.awaitingInputSound;
+	if (raw.awaitingInputSound !== undefined && !awaitingValue) warnInvalid("awaitingInputSound");
 	const soundFocusMode = isFocusMode(raw.soundFocusMode)
 		? raw.soundFocusMode
 		: DEFAULT_CONFIG.soundFocusMode;
+	if (raw.soundFocusMode !== undefined && !isFocusMode(raw.soundFocusMode)) warnInvalid("soundFocusMode");
 	return { mode, completionSound, awaitingInputSound, soundFocusMode };
 }
 
@@ -73,8 +86,25 @@ export function saveConfig(patch: Partial<FusionConfig>): void {
 	try {
 		mkdirSync(dirname(CONFIG_PATH), { recursive: true });
 		const next = { ...readRaw(), ...patch };
-		writeFileSync(CONFIG_PATH, `${JSON.stringify(next, null, 2)}\n`);
-	} catch {}
+		const data = `${JSON.stringify(next, null, 2)}\n`;
+		// Write/rename in the same directory: readers see either the old complete
+		// JSON or the new complete JSON, never a partially written file (L1-02).
+		const tempPath = `${CONFIG_PATH}.${process.pid}.tmp`;
+		let mode: number | undefined;
+		try {
+			mode = statSync(CONFIG_PATH).mode & 0o777;
+		} catch {}
+		if (mode === undefined) writeFileSync(tempPath, data);
+		else writeFileSync(tempPath, data, { mode });
+		if (mode !== undefined) chmodSync(tempPath, mode);
+		renameSync(tempPath, CONFIG_PATH);
+	} catch {
+		// Best effort, matching the existing config API. A failed rename leaves
+		// the previous config intact; clean up the temp file when possible.
+		try {
+			unlinkSync(`${CONFIG_PATH}.${process.pid}.tmp`);
+		} catch {}
+	}
 }
 
 /** Persisted mode, defaulting to "full" when missing or unreadable. */

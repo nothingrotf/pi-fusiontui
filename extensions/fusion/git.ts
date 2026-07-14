@@ -11,6 +11,10 @@ export type GitStatus = {
 	behind: number;
 	staged: number;
 	modified: number;
+	added: number;
+	deleted: number;
+	renamed: number;
+	copied: number;
 	untracked: number;
 	conflicted: number;
 };
@@ -23,6 +27,10 @@ export function emptyGitStatus(): GitStatus {
 		behind: 0,
 		staged: 0,
 		modified: 0,
+		added: 0,
+		deleted: 0,
+		renamed: 0,
+		copied: 0,
 		untracked: 0,
 		conflicted: 0,
 	};
@@ -60,7 +68,14 @@ export function parsePorcelain(stdout: string): GitStatus {
 		const x = xy[0] ?? ".";
 		const y = xy[1] ?? ".";
 		if (x !== "." && x !== " ") status.staged += 1;
-		if (y === "M") status.modified += 1;
+		const codes = `${x}${y}`;
+		// Count each path once per category, even when both index and worktree
+		// carry the same status (for example `MM`).
+		if (codes.includes("M") || codes.includes("T")) status.modified += 1;
+		if (codes.includes("A")) status.added += 1;
+		if (codes.includes("D")) status.deleted += 1;
+		if (codes.includes("R")) status.renamed += 1;
+		if (codes.includes("C")) status.copied += 1;
 	}
 	return status;
 }

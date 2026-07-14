@@ -1,8 +1,15 @@
-import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { formatResetIn } from "./format";
+
+const execFileAsync = promisify(execFile);
+const REQUEST_TIMEOUT_MS = 5_000;
+const KEYCHAIN_TIMEOUT_MS = 1_500;
+
+type AuthRecord = Record<string, unknown>;
 
 /** A single rate-limit window (e.g. the rolling 5h window or the weekly window). */
 export type UsageWindow = {
@@ -21,122 +28,196 @@ export type UsageSnapshot = {
 };
 
 const clamp = (v: number) => (Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0);
-/** Accept either a 0-1 fraction or a 0-100 percent. */
-const normalizePercent = (v: number) => clamp(v <= 1 && v >= 0 ? v * 100 : v);
+/** Both provider payloads expose utilization as a 0-100 percentage. */
+const normalizePercent = (v: unknown) =>
+	typeof v === "number" && Number.isFinite(v) ? clamp(v) : 0;
 
-function loadAuth(): Record<string, any> {
-	const p = join(homedir(), ".pi", "agent", "auth.json");
-	try {
-		if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8"));
-	} catch {}
-	return {};
-}
-
-function getClaudeToken(): string | undefined {
-	const auth = loadAuth();
-	if (auth.anthropic?.access) return auth.anthropic.access;
-	// macOS Claude Code keychain fallback.
-	try {
-		const raw = execSync('security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null', {
-			encoding: "utf-8",
-			stdio: ["pipe", "pipe", "pipe"],
-		}).trim();
-		if (raw) return JSON.parse(raw)?.claudeAiOauth?.accessToken;
-	} catch {}
-	return undefined;
-}
-
-function getCodexCreds(): { token: string; accountId?: string } | undefined {
-	const auth = loadAuth();
-	if (auth["openai-codex"]?.access) {
-		return { token: auth["openai-codex"].access, accountId: auth["openai-codex"]?.accountId };
-	}
-	return undefined;
-}
-
-async function fetchWithTimeout(url: string, init: RequestInit, ms = 5000): Promise<Response> {
+/**
+ * Run an async operation with a signal that is also cancelled by a deadline.
+ * The timeout wraps response body consumption as well as headers (L2-02).
+ */
+async function withTimeout<T>(
+	parent: AbortSignal | undefined,
+	ms: number,
+	work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
 	const controller = new AbortController();
-	const t = setTimeout(() => controller.abort(), ms);
+	const relay = () => controller.abort(parent?.reason);
+	if (parent) {
+		if (parent.aborted) relay();
+		else parent.addEventListener("abort", relay, { once: true });
+	}
+	const timer = setTimeout(() => controller.abort(new Error("operation timed out")), ms);
 	try {
-		return await fetch(url, { ...init, signal: controller.signal });
+		return await work(controller.signal);
 	} finally {
-		clearTimeout(t);
+		clearTimeout(timer);
+		parent?.removeEventListener("abort", relay);
 	}
 }
 
-async function fetchClaudeUsage(): Promise<UsageSnapshot> {
-	const token = getClaudeToken();
-	if (!token) return { provider: "Claude", windows: [], error: "no-auth", fetchedAt: Date.now() };
+async function loadAuth(signal?: AbortSignal): Promise<AuthRecord> {
 	try {
-		const res = await fetchWithTimeout("https://api.anthropic.com/api/oauth/usage", {
-			headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
+		const p = join(homedir(), ".pi", "agent", "auth.json");
+		const raw = await readFile(p, { encoding: "utf8", signal });
+		const parsed: unknown = JSON.parse(raw);
+		return parsed && typeof parsed === "object" ? (parsed as AuthRecord) : {};
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		return {};
+	}
+}
+
+function nestedString(value: unknown, ...keys: string[]): string | undefined {
+	let current = value;
+	for (const key of keys) {
+		if (!current || typeof current !== "object") return undefined;
+		current = (current as Record<string, unknown>)[key];
+	}
+	return typeof current === "string" && current.length > 0 ? current : undefined;
+}
+
+async function getClaudeToken(signal?: AbortSignal): Promise<string | undefined> {
+	const auth = await loadAuth(signal);
+	const direct = nestedString(auth.anthropic, "access");
+	if (direct) return direct;
+
+	// macOS Claude Code keychain fallback. This is asynchronous and bounded so
+	// the initial TUI render/input loop is never blocked (L2-03).
+	try {
+		const raw = await withTimeout(signal, KEYCHAIN_TIMEOUT_MS, async (keychainSignal) => {
+			const result = await execFileAsync(
+				"security",
+				["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+				{
+					encoding: "utf8",
+					maxBuffer: 64 * 1024,
+					signal: keychainSignal,
+				},
+			);
+			return String(result.stdout).trim();
 		});
-		if (!res.ok) return { provider: "Claude", windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
-		const data = (await res.json()) as any;
+		if (!raw) return undefined;
+		const parsed: unknown = JSON.parse(raw);
+		return nestedString(parsed, "claudeAiOauth", "accessToken");
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		return undefined;
+	}
+}
+
+async function getCodexCreds(
+	signal?: AbortSignal,
+): Promise<{ token: string; accountId?: string } | undefined> {
+	const auth = await loadAuth(signal);
+	const record = auth["openai-codex"];
+	const token = nestedString(record, "access");
+	if (!token) return undefined;
+	return { token, accountId: nestedString(record, "accountId") };
+}
+
+type JsonResponse = { response: Response; data?: unknown };
+
+async function fetchJson(
+	url: string,
+	init: RequestInit,
+	parentSignal?: AbortSignal,
+): Promise<JsonResponse> {
+	return withTimeout(parentSignal, REQUEST_TIMEOUT_MS, async (signal) => {
+		const response = await fetch(url, { ...init, signal });
+		if (!response.ok) return { response };
+		// Keep this inside the timeout: headers can arrive while the body stalls.
+		const data: unknown = await response.json();
+		return { response, data };
+	});
+}
+
+async function fetchClaudeUsage(signal?: AbortSignal): Promise<UsageSnapshot> {
+	const provider = "Claude";
+	try {
+		const token = await getClaudeToken(signal);
+		if (!token) return { provider, windows: [], error: "no-auth", fetchedAt: Date.now() };
+		const { response: res, data } = await fetchJson(
+			"https://api.anthropic.com/api/oauth/usage",
+			{ headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" } },
+			signal,
+		);
+		if (!res.ok) return { provider, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+		const record = data && typeof data === "object" ? (data as Record<string, any>) : {};
 		const windows: UsageWindow[] = [];
-		if (data.five_hour?.utilization !== undefined) {
+		if (record.five_hour?.utilization !== undefined) {
 			windows.push({
 				label: "5h",
-				usedPercent: normalizePercent(data.five_hour.utilization),
-				resetsIn: data.five_hour.resets_at ? formatResetIn(new Date(data.five_hour.resets_at)) : undefined,
+				usedPercent: normalizePercent(record.five_hour.utilization),
+				resetsIn: record.five_hour.resets_at ? formatResetIn(new Date(record.five_hour.resets_at)) : undefined,
 			});
 		}
-		if (data.seven_day?.utilization !== undefined) {
+		if (record.seven_day?.utilization !== undefined) {
 			windows.push({
 				label: "wk",
-				usedPercent: normalizePercent(data.seven_day.utilization),
-				resetsIn: data.seven_day.resets_at ? formatResetIn(new Date(data.seven_day.resets_at)) : undefined,
+				usedPercent: normalizePercent(record.seven_day.utilization),
+				resetsIn: record.seven_day.resets_at ? formatResetIn(new Date(record.seven_day.resets_at)) : undefined,
 			});
 		}
-		return { provider: "Claude", windows, fetchedAt: Date.now() };
-	} catch (e) {
-		return { provider: "Claude", windows: [], error: String(e), fetchedAt: Date.now() };
+		return { provider, windows, fetchedAt: Date.now() };
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		return { provider, windows: [], error: String(error), fetchedAt: Date.now() };
 	}
 }
 
-async function fetchCodexUsage(): Promise<UsageSnapshot> {
-	const creds = getCodexCreds();
-	if (!creds) return { provider: "Codex", windows: [], error: "no-auth", fetchedAt: Date.now() };
+async function fetchCodexUsage(signal?: AbortSignal): Promise<UsageSnapshot> {
+	const provider = "Codex";
 	try {
+		const creds = await getCodexCreds(signal);
+		if (!creds) return { provider, windows: [], error: "no-auth", fetchedAt: Date.now() };
 		const headers: Record<string, string> = {
 			Authorization: `Bearer ${creds.token}`,
 			"User-Agent": "pi-agent",
 			Accept: "application/json",
 		};
 		if (creds.accountId) headers["ChatGPT-Account-Id"] = creds.accountId;
-		const res = await fetchWithTimeout("https://chatgpt.com/backend-api/wham/usage", { headers });
-		if (!res.ok) return { provider: "Codex", windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
-		const data = (await res.json()) as any;
+		const { response: res, data } = await fetchJson(
+			"https://chatgpt.com/backend-api/wham/usage",
+			{ headers },
+			signal,
+		);
+		if (!res.ok) return { provider, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+		const record = data && typeof data === "object" ? (data as Record<string, any>) : {};
 		const windows: UsageWindow[] = [];
-		const pw = data.rate_limit?.primary_window;
+		const pw = record.rate_limit?.primary_window;
 		if (pw) {
 			windows.push({
 				label: "5h",
-				usedPercent: clamp(pw.used_percent ?? 0),
+				usedPercent: normalizePercent(pw.used_percent),
 				resetsIn: pw.reset_at ? formatResetIn(new Date(pw.reset_at * 1000)) : undefined,
 			});
 		}
-		const sw = data.rate_limit?.secondary_window;
+		const sw = record.rate_limit?.secondary_window;
 		if (sw) {
 			windows.push({
 				label: "wk",
-				usedPercent: clamp(sw.used_percent ?? 0),
+				usedPercent: normalizePercent(sw.used_percent),
 				resetsIn: sw.reset_at ? formatResetIn(new Date(sw.reset_at * 1000)) : undefined,
 			});
 		}
-		return { provider: "Codex", windows, fetchedAt: Date.now() };
-	} catch (e) {
-		return { provider: "Codex", windows: [], error: String(e), fetchedAt: Date.now() };
+		return { provider, windows, fetchedAt: Date.now() };
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		return { provider, windows: [], error: String(error), fetchedAt: Date.now() };
 	}
 }
 
 /** Map a Pi model provider id to its usage fetcher. */
-export function fetchUsageForProvider(modelProvider: string | undefined): Promise<UsageSnapshot> | null {
+export function fetchUsageForProvider(
+	modelProvider: string | undefined,
+	signal?: AbortSignal,
+): Promise<UsageSnapshot> | null {
 	switch (modelProvider) {
 		case "anthropic":
-			return fetchClaudeUsage();
+			return fetchClaudeUsage(signal);
 		case "openai-codex":
-			return fetchCodexUsage();
+			return fetchCodexUsage(signal);
 		default:
 			return null;
 	}

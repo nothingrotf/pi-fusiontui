@@ -4,6 +4,7 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+	CURSOR_MARKER,
 	type EditorTheme,
 	type TUI,
 	truncateToWidth,
@@ -11,6 +12,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { DROID, hex, subscribeTicker, tickerTick } from "./droid";
 import type { AgentActivity } from "./state";
+import { fitLine, normalizeWidth } from "./render-safe";
 import { fg } from "./theme";
 
 export type EditorMeta = {
@@ -111,6 +113,7 @@ function fill(line: string, w: number): string {
 export class FusionEditor extends CustomEditor {
 	private readonly uiTheme: Theme;
 	private readonly getMeta: () => EditorMeta;
+	private readonly isCurrent: () => boolean;
 	private unsubscribeTicker: (() => void) | undefined;
 
 	constructor(
@@ -119,10 +122,12 @@ export class FusionEditor extends CustomEditor {
 		keybindings: KeybindingsManager,
 		uiTheme: Theme,
 		getMeta: () => EditorMeta,
+		isCurrent: () => boolean = () => true,
 	) {
 		super(tui, theme, keybindings, { paddingX: 0 });
 		this.uiTheme = uiTheme;
 		this.getMeta = getMeta;
+		this.isCurrent = isCurrent;
 	}
 
 	/**
@@ -158,6 +163,10 @@ export class FusionEditor extends CustomEditor {
 		const meta = this.getMeta();
 		const active = meta.agent !== "idle" && meta.workingLabel.length > 0;
 		// Animate only while active; the ticker is ref-counted and self-stops.
+		if (!this.isCurrent()) {
+			this.dispose();
+			return "";
+		}
 		if (active && !this.unsubscribeTicker) {
 			// Repaint on every 2nd tick (10 fps) — the spinner frame index derives
 			// from tick/2, so intermediate ticks would repaint an identical frame.
@@ -181,6 +190,12 @@ export class FusionEditor extends CustomEditor {
 		);
 	}
 
+	/** Keep the editor frame within the actual terminal height on extreme LINES. */
+	private capHeight(lines: string[]): string[] {
+		const rows = normalizeWidth(this.tui.terminal.rows);
+		return rows > 0 && lines.length > rows ? lines.slice(-rows) : lines;
+	}
+
 	/** Right-aligned `model (effort)` meta row floated above the box (constant-height: blank when no model). */
 	private metaRow(width: number): string {
 		const meta = this.getMeta();
@@ -197,14 +212,27 @@ export class FusionEditor extends CustomEditor {
 	}
 
 	render(width: number): string[] {
-		// Too narrow to box — fall back to the plain editor.
-		if (width <= 8) return super.render(width);
+		const w = normalizeWidth(width);
+		const status = this.statusLine(w);
+		const metaLine = this.metaRow(w);
+		// Narrow terminals still retain the two prelude rows. Dropping them was
+		// the source of a mode-dependent height jump and stale differ rows (L3-04).
+		if (w <= 8) {
+			const compact = super.render(Math.max(1, w));
+			return this.capHeight([
+				status,
+				metaLine,
+				...(compact.length ? compact : [""]).map((line) => fitLine(line, w, "")),
+			]);
+		}
 
 		const meta = this.getMeta();
 		const promptW = visibleWidth(PROMPT) + 1; // chevron + 1 space
-		const textW = width - 4 - promptW; // `│ ` + prompt + text + ` │`
+		const textW = Math.max(1, w - 4 - promptW); // `│ ` + prompt + text + ` │`
 		const base = super.render(textW);
-		if (base.length < 2) return super.render(width);
+		if (base.length < 2) {
+			return this.capHeight([status, metaLine, ...base.map((line) => fitLine(line, w, ""))]);
+		}
 
 		// Split base into [topRule] content [bottomRule] (+ trailing autocomplete).
 		// When a rule is missing, keep the lines instead of slicing real content
@@ -217,17 +245,33 @@ export class FusionEditor extends CustomEditor {
 				break;
 			}
 		}
-		const content = base.slice(
+		let content = base.slice(
 			topIdx === -1 ? 0 : topIdx + 1,
 			botIdx === -1 ? base.length : botIdx,
 		);
+		// Reserve the two prelude rows from the base editor's ~30% viewport
+		// budget. Keep the cursor-containing rows at the bottom when trimming;
+		// this is the safest available integration until pi-tui exposes a public
+		// viewport-row callback (L3-05).
+		const terminalRows = normalizeWidth(this.tui.terminal.rows);
+		const baseBudget = Math.max(1, Math.floor(terminalRows * 0.3) - 2);
+		const availableContentRows = Math.max(0, terminalRows - 4 /* prelude + top/bottom */);
+		const maxContentRows = Math.min(baseBudget, availableContentRows);
+		if (content.length > maxContentRows) {
+			const cursorIndex = content.findIndex((line) => line.includes(CURSOR_MARKER));
+			const preferredStart = cursorIndex >= 0
+				? cursorIndex - maxContentRows + 1
+				: content.length - maxContentRows;
+			const start = Math.max(0, Math.min(preferredStart, content.length - maxContentRows));
+			content = content.slice(start, start + maxContentRows);
+		}
 		const trailing = botIdx === -1 ? [] : base.slice(botIdx + 1); // autocomplete dropdown, if any
 
 		const bd = (s: string) => hex(DROID[BORDER_KEYS[meta.agent]], s);
 		const chevron = hex(DROID.primary, PROMPT);
 		const indent = " ".repeat(promptW); // align wrapped lines under first line
-		const top = bd(`╭${"─".repeat(width - 2)}╮`);
-		const bottom = bd(`╰${"─".repeat(width - 2)}╯`);
+		const top = bd(`╭${"─".repeat(Math.max(0, w - 2))}╮`);
+		const bottom = bd(`╰${"─".repeat(Math.max(0, w - 2))}╯`);
 		const rows = (content.length ? content : [""]).map((line, i) => {
 			const prefix = i === 0 ? `${chevron} ` : indent;
 			return `${bd("│")} ${prefix}${fill(line, textW)} ${bd("│")}`;
@@ -237,13 +281,17 @@ export class FusionEditor extends CustomEditor {
 		// Pi puts the item name at its own col 2 (col 0-1 = selection gutter), so an
 		// indent of 2 lands names under the typed text and the → arrow under the chevron.
 		const acIndent = "  ";
-		const dropdown = trailing.map((line) =>
+		const dropdownBudget = Math.max(
+			0,
+			terminalRows - 2 /* prelude */ - 2 /* box borders */ - content.length,
+		);
+		const dropdown = trailing.slice(0, dropdownBudget).map((line) =>
 			line.length ? `${acIndent}${line}` : line,
 		);
 
 		const box = [top, ...rows, bottom, ...dropdown];
 		// Constant two-row prelude (status + meta), blank when inactive — the
 		// editor must never change height on agent-state transitions (see above).
-		return [this.statusLine(width), this.metaRow(width), ...box];
+		return this.capHeight([status, metaLine, ...box.map((line) => fitLine(line, w, ""))]);
 	}
 }

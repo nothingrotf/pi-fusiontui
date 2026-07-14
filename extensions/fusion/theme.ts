@@ -1,6 +1,18 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type FgFn = (color: string, text: string) => string;
+
+/** Left + right justified across `width`. When tight, keep right, ellipsis-truncate left. */
+export function justify(left: string, right: string, width: number): string {
+	const lw = visibleWidth(left);
+	const rw = visibleWidth(right);
+	if (lw + 1 + rw <= width)
+		return `${left}${" ".repeat(width - lw - rw)}${right}`;
+	if (rw + 2 <= width)
+		return justify(truncateToWidth(left, width - rw - 1, "…"), right, width);
+	return truncateToWidth(right || left, width, "");
+}
 
 /** theme.fg that accepts any color token string and never throws on an unknown one. */
 export function fg(theme: Pick<Theme, "fg">, color: string, text: string): string {

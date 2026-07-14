@@ -1,33 +1,83 @@
-import { CustomEditor, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
-import { type EditorTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	CustomEditor,
+	type KeybindingsManager,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
+import {
+	type EditorTheme,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
+import { DROID, hex, subscribeTicker, tickerTick } from "./droid";
+import type { AgentActivity } from "./state";
 import { fg } from "./theme";
 
 export type EditorMeta = {
 	modelLabel: string;
 	effortLabel: string;
+	agent: AgentActivity;
+	/** Live status shown above the box while the agent runs (never leaks into scrollback). */
+	workingLabel: string;
 };
 
-/** Box border color token. Change to taste: "accent" | "border" | "borderMuted". */
-const BORDER_COLOR = "accent";
+/**
+ * Droid's live-status spinner — the `dotsClockwise` preset, frames verbatim
+ * from the bundle (@592752). Droid steps it at 60 ms; the shared fusion ticker
+ * repaints every 2nd 50 ms tick (100 ms) to keep transcript repaints at 10 fps.
+ */
+const SPINNER = [
+	"\u2819", "\u2818", "\u2838", "\u2830", "\u28B0", "\u28A0", "\u28E0", "\u28C0",
+	"\u28C4", "\u2844", "\u2846", "\u2806", "\u2807", "\u2803", "\u280B", "\u2809",
+];
 
-/** Chevron prompt drawn inside the box (Droid-style). Color = "accent". */
+/**
+ * Border color by agent activity. Droid's Auto composer border is a CONSTANT
+ * `uT.border` (traced @613578: `borderColor: uT.border`) — activity is
+ * conveyed by the spinner row, not the border. The working/awaiting tints are
+ * a deliberate fusion deviation, now resolved from the ACTIVE pi theme via
+ * the live DROID palette (fallback: droid factory-dark):
+ *  - idle     → theme `border`      (droid #878787)
+ *  - working  → theme `borderMuted` (droid #767676 — the box recedes)
+ *  - awaiting → theme `warning`     (droid #ffaf00 — the agent asked YOU)
+ */
+const BORDER_KEYS: Record<AgentActivity, "borderIdle" | "borderWorking" | "borderAwaiting"> = {
+	idle: "borderIdle",
+	working: "borderWorking",
+	awaiting: "borderAwaiting",
+};
+
+/**
+ * Chevron prompt drawn inside the box. Droid draws `"> "` in
+ * `_U0.prompt.normal = uT.primary` (#d75f00, traced @613139/@613625).
+ */
 const PROMPT = ">";
-const PROMPT_COLOR = "accent";
 
 /** Map effort label → Pi theme thinking-level color token. */
 function effortColor(label: string): string {
 	switch (label.toLowerCase()) {
-		case "minimal": return "thinkingMinimal";
-		case "low":     return "thinkingLow";
-		case "medium":  return "thinkingMedium";
-		case "high":    return "thinkingHigh";
-		case "xhigh":   return "thinkingXhigh";
-		default:        return "muted";
+		case "minimal":
+			return "thinkingMinimal";
+		case "low":
+			return "thinkingLow";
+		case "medium":
+			return "thinkingMedium";
+		case "high":
+			return "thinkingHigh";
+		case "xhigh":
+			return "thinkingXhigh";
+		case "max":
+			return "thinkingMax";
+		default:
+			return "muted";
 	}
 }
 
 const stripAnsi = (s: string): string =>
-	s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
+	s
+		.replace(/\x1b\[[0-9;]*m/g, "")
+		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+		.replace(/\x1b_[^\x07]*(?:\x07|\x1b\\)/g, "");
 
 /**
  * A border line drawn by the base editor. Two shapes:
@@ -53,6 +103,7 @@ function fill(line: string, w: number): string {
  * Droid-style "bubble" editor:
  *  - Pi's native editor only draws a top + bottom rule (two horizontal lines),
  *    so we redraw a full rounded box ╭╮│╰╯ around the editor content.
+ *  - The border color encodes the agent activity (idle/working/awaiting).
  *  - The native colored `›` prompt and the in-text cursor block are preserved
  *    (they shift right with the `│ ` rail automatically).
  *  - A right-aligned `model (effort)` meta row floats above the box.
@@ -60,6 +111,7 @@ function fill(line: string, w: number): string {
 export class FusionEditor extends CustomEditor {
 	private readonly uiTheme: Theme;
 	private readonly getMeta: () => EditorMeta;
+	private unsubscribeTicker: (() => void) | undefined;
 
 	constructor(
 		tui: TUI,
@@ -73,41 +125,106 @@ export class FusionEditor extends CustomEditor {
 		this.getMeta = getMeta;
 	}
 
-	private metaRow(width: number): string | undefined {
+	/**
+	 * The bubble math assumes zero native padding — but interactive-mode copies
+	 * the user's editorPaddingX setting onto every custom editor right after
+	 * construction (`newEditor.setPaddingX(defaultEditor.getPaddingX())`).
+	 * Lock it at 0 so the droid frame stays consistent.
+	 */
+	override setPaddingX(_padding: number): void {
+		super.setPaddingX(0);
+	}
+
+	/**
+	 * Release the ticker subscription. interactive-mode does NOT dispose
+	 * replaced custom editors — without this, tearing the editor down while the
+	 * agent is running leaks a 50 ms interval that repaints a dead TUI forever.
+	 */
+	dispose(): void {
+		this.unsubscribeTicker?.();
+		this.unsubscribeTicker = undefined;
+	}
+
+	/**
+	 * `⠋ Thinking… · ctx 3%` — the live status row above the composer (Droid's
+	 * transcript spinner analog), rendered here instead of Pi's loader row.
+	 *
+	 * ALWAYS returns a row (blank when idle): pi-tui's differ bakes stale rows
+	 * into terminal scrollback whenever a repaint grows the frame past the
+	 * viewport, so the editor must keep a CONSTANT height — toggling this row
+	 * on/off is what corrupted the transcript on state changes.
+	 */
+	private statusLine(width: number): string {
 		const meta = this.getMeta();
-		if (!meta.modelLabel || meta.modelLabel === "no-model") return undefined;
+		const active = meta.agent !== "idle" && meta.workingLabel.length > 0;
+		// Animate only while active; the ticker is ref-counted and self-stops.
+		if (active && !this.unsubscribeTicker) {
+			// Repaint on every 2nd tick (10 fps) — the spinner frame index derives
+			// from tick/2, so intermediate ticks would repaint an identical frame.
+			this.unsubscribeTicker = subscribeTicker(() => {
+				if (tickerTick() % 2 === 0) this.tui.requestRender();
+			});
+		} else if (!active && this.unsubscribeTicker) {
+			this.unsubscribeTicker();
+			this.unsubscribeTicker = undefined;
+		}
+		if (!active) return "";
+		const frame = SPINNER[Math.floor(tickerTick() / 2) % SPINNER.length];
+		// Droid (traced @645188): `paddingLeft: 1`, spinner + text in uT.primary,
+		// hint ` (Press ESC to stop)` in uT.text.muted + dim, truncated to width-2.
+		// Truncated to width — an overflowing status row wraps in the terminal,
+		// changes the editor's height and desyncs pi-tui's differ.
+		return truncateToWidth(
+			` ${hex(DROID.primary, `${frame} ${meta.workingLabel}`)} ${hex(DROID.muted, "(Press ESC to stop)")}`,
+			width,
+			"…",
+		);
+	}
+
+	/** Right-aligned `model (effort)` meta row floated above the box (constant-height: blank when no model). */
+	private metaRow(width: number): string {
+		const meta = this.getMeta();
+		if (!meta.modelLabel || meta.modelLabel === "no-model") return "";
 		const modelPart = fg(this.uiTheme, "muted", meta.modelLabel);
 		const effortPart = meta.effortLabel
 			? ` ${fg(this.uiTheme, effortColor(meta.effortLabel), `(${meta.effortLabel})`)}`
 			: "";
-		const plain = meta.effortLabel ? `${meta.modelLabel} (${meta.effortLabel})` : meta.modelLabel;
+		const plain = meta.effortLabel
+			? `${meta.modelLabel} (${meta.effortLabel})`
+			: meta.modelLabel;
 		const pad = Math.max(0, width - visibleWidth(plain));
-		return `${" ".repeat(pad)}${modelPart}${effortPart}`;
+		return truncateToWidth(`${" ".repeat(pad)}${modelPart}${effortPart}`, width, "…");
 	}
 
 	render(width: number): string[] {
 		// Too narrow to box — fall back to the plain editor.
 		if (width <= 8) return super.render(width);
 
+		const meta = this.getMeta();
 		const promptW = visibleWidth(PROMPT) + 1; // chevron + 1 space
-		const textW = width - 4 - promptW;         // `│ ` + prompt + text + ` │`
+		const textW = width - 4 - promptW; // `│ ` + prompt + text + ` │`
 		const base = super.render(textW);
 		if (base.length < 2) return super.render(width);
 
 		// Split base into [topRule] content [bottomRule] (+ trailing autocomplete).
-		let topIdx = base.findIndex(isRule);
-		if (topIdx === -1) topIdx = 0;
+		// When a rule is missing, keep the lines instead of slicing real content
+		// out (the old `topIdx=0 / botIdx=len-1` fallback dropped two lines).
+		const topIdx = base.findIndex(isRule);
 		let botIdx = -1;
 		for (let i = base.length - 1; i > topIdx; i--) {
-			if (isRule(base[i])) { botIdx = i; break; }
+			if (isRule(base[i])) {
+				botIdx = i;
+				break;
+			}
 		}
-		if (botIdx === -1) botIdx = base.length - 1;
+		const content = base.slice(
+			topIdx === -1 ? 0 : topIdx + 1,
+			botIdx === -1 ? base.length : botIdx,
+		);
+		const trailing = botIdx === -1 ? [] : base.slice(botIdx + 1); // autocomplete dropdown, if any
 
-		const content = base.slice(topIdx + 1, botIdx);
-		const trailing = base.slice(botIdx + 1); // autocomplete dropdown, if any
-
-		const bd = (s: string) => fg(this.uiTheme, BORDER_COLOR, s);
-		const chevron = fg(this.uiTheme, PROMPT_COLOR, PROMPT);
+		const bd = (s: string) => hex(DROID[BORDER_KEYS[meta.agent]], s);
+		const chevron = hex(DROID.primary, PROMPT);
 		const indent = " ".repeat(promptW); // align wrapped lines under first line
 		const top = bd(`╭${"─".repeat(width - 2)}╮`);
 		const bottom = bd(`╰${"─".repeat(width - 2)}╯`);
@@ -120,10 +237,13 @@ export class FusionEditor extends CustomEditor {
 		// Pi puts the item name at its own col 2 (col 0-1 = selection gutter), so an
 		// indent of 2 lands names under the typed text and the → arrow under the chevron.
 		const acIndent = "  ";
-		const dropdown = trailing.map((line) => (line.length ? `${acIndent}${line}` : line));
+		const dropdown = trailing.map((line) =>
+			line.length ? `${acIndent}${line}` : line,
+		);
 
 		const box = [top, ...rows, bottom, ...dropdown];
-		const meta = this.metaRow(width);
-		return meta ? [meta, ...box] : box;
+		// Constant two-row prelude (status + meta), blank when inactive — the
+		// editor must never change height on agent-state transitions (see above).
+		return [this.statusLine(width), this.metaRow(width), ...box];
 	}
 }

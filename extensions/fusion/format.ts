@@ -40,10 +40,11 @@ export function prettyModel(id: string | undefined): string {
 		.join(" ");
 }
 
-/** "high" -> "High", "xhigh" -> "XHigh", "off" -> "" */
+/** "high" -> "High", "xhigh" -> "XHigh", "max" -> "Max", "off" -> "" */
 export function prettyEffort(level: string | undefined): string {
 	if (!level || level === "off") return "";
 	if (level === "xhigh") return "XHigh";
+	if (level === "max") return "Max";
 	return level.charAt(0).toUpperCase() + level.slice(1);
 }
 

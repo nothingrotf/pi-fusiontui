@@ -18,6 +18,11 @@ export interface FusionConfig {
 	mode: FooterMode;
 	/** Sound played when the agent finishes its turn (default: fx-ok01). */
 	completionSound: SoundValue;
+	/**
+	 * Sound played when the agent is waiting on you — an AskUser-style question
+	 * (default: fx-ack01, mirroring Droid's awaiting-input default).
+	 */
+	awaitingInputSound: SoundValue;
 	/** Focus policy for sounds (default: always). */
 	soundFocusMode: SoundFocusMode;
 }
@@ -25,6 +30,7 @@ export interface FusionConfig {
 export const DEFAULT_CONFIG: FusionConfig = {
 	mode: "full",
 	completionSound: "fx-ok01",
+	awaitingInputSound: "fx-ack01",
 	soundFocusMode: "always",
 };
 
@@ -52,10 +58,14 @@ export function loadConfig(): FusionConfig {
 		typeof raw.completionSound === "string" && raw.completionSound.length > 0
 			? (raw.completionSound as SoundValue)
 			: DEFAULT_CONFIG.completionSound;
+	const awaitingInputSound =
+		typeof raw.awaitingInputSound === "string" && raw.awaitingInputSound.length > 0
+			? (raw.awaitingInputSound as SoundValue)
+			: DEFAULT_CONFIG.awaitingInputSound;
 	const soundFocusMode = isFocusMode(raw.soundFocusMode)
 		? raw.soundFocusMode
 		: DEFAULT_CONFIG.soundFocusMode;
-	return { mode, completionSound, soundFocusMode };
+	return { mode, completionSound, awaitingInputSound, soundFocusMode };
 }
 
 /** Merge a partial update into the persisted config (preserves unknown keys). */

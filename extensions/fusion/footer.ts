@@ -1,22 +1,11 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { formatCwd } from "./format";
 import type { FusionState } from "./state";
 import type { UsageSnapshot, UsageWindow } from "./usage";
-import { fg, loadColor } from "./theme";
+import { fg, justify, loadColor } from "./theme";
 
 type Th = Pick<Theme, "fg">;
-
-/** Left + right justified across `width`. When tight, keep right, ellipsis-truncate left. */
-function justify(left: string, right: string, width: number): string {
-	const lw = visibleWidth(left);
-	const rw = visibleWidth(right);
-	if (lw + 1 + rw <= width)
-		return `${left}${" ".repeat(width - lw - rw)}${right}`;
-	if (rw + 2 <= width)
-		return justify(truncateToWidth(left, width - rw - 1, "…"), right, width);
-	return truncateToWidth(right || left, width, "");
-}
 
 /** ` main [!2 ↑1]` — Starship-style branch segment with nerd-font icon. */
 function branchSegment(theme: Th, state: FusionState): string {
@@ -75,12 +64,64 @@ export function installFooter(
 	ctx: ExtensionContext,
 	getState: () => FusionState,
 	hooks: {
-		setRequestRender: (fn: (() => void) | undefined) => void;
+		setRequestRender: (fn: ((force?: boolean) => void) | undefined) => void;
+		setResync: (fn: (() => void) | undefined) => void;
+		setFrameOverflows: (fn: (() => boolean) | undefined) => void;
 		onBranchChange: () => void;
 	},
 ): void {
 	ctx.ui.setFooter((tui, theme, footerData) => {
-		hooks.setRequestRender(() => tui.requestRender());
+		hooks.setRequestRender((force?: boolean) => tui.requestRender(force));
+		// Viewport resync: pi-tui's differ can desync its row bookkeeping from
+		// the physical screen (implicit scrolls during over-viewport repaints),
+		// leaving stale/duplicated rows it can never repaint. This reprints ONLY
+		// the visible screen from pi's own frame buffer, IN PLACE:
+		//  - no \x1b[3J — the user's scrollback content survives;
+		//  - no \x1b[2J — macOS terminals (iTerm2/Terminal.app default settings)
+		//    push the cleared screen INTO scrollback on ED(2), so a 2J-based
+		//    repaint appended a duplicate screenful to scrollback on every heal.
+		//    Scrolling up then showed the whole session repeated over and over.
+		// Instead: home the cursor, per-row erase+rewrite (EL(2)), then ED(0)
+		// below the content — none of which trigger the save-to-scrollback path.
+		hooks.setResync(() => {
+			const t = tui as unknown as {
+				terminal: { rows: number; write(s: string): void };
+				previousLines?: string[];
+				previousViewportTop?: number;
+				cursorRow?: number;
+				hardwareCursorRow?: number;
+				requestRender(): void;
+			};
+			const lines = t.previousLines;
+			if (!lines || lines.length === 0) return;
+			const height = t.terminal.rows;
+			const start = Math.max(0, lines.length - height);
+			let buf = "\x1b[?2026h\x1b[H"; // sync + home (NO clear — see above)
+			for (let i = start; i < lines.length; i++) {
+				if (i > start) buf += "\r\n";
+				buf += `\x1b[2K${lines[i]}`;
+			}
+			buf += "\x1b[0J"; // clear anything below the reprinted content
+			buf += "\x1b[?2026l";
+			t.terminal.write(buf);
+			// Re-establish the bookkeeping pi-tui assumes on the next diff.
+			t.previousViewportTop = start;
+			t.cursorRow = lines.length - 1;
+			t.hardwareCursorRow = lines.length - 1;
+			t.requestRender(); // repositions the hardware cursor
+		});
+		// Does pi-tui's current frame exceed the visible viewport? Only an
+		// over-viewport repaint scrolls rows off the top into terminal scrollback,
+		// where the in-place resync can never reach them. This is the signal the
+		// orchestrator uses at agent_end to pick the deep clean (full clear +
+		// reprint) over the cheap scrollback-preserving resync.
+		hooks.setFrameOverflows(() => {
+			const t = tui as unknown as {
+				previousLines?: string[];
+				terminal: { rows: number };
+			};
+			return (t.previousLines?.length ?? 0) > t.terminal.rows;
+		});
 		const unsub = footerData.onBranchChange(() => {
 			hooks.onBranchChange();
 			tui.requestRender();
@@ -90,6 +131,8 @@ export function installFooter(
 			dispose: () => {
 				unsub();
 				hooks.setRequestRender(undefined);
+				hooks.setResync(undefined);
+				hooks.setFrameOverflows(undefined);
 			},
 			invalidate() {},
 			render(width: number): string[] {

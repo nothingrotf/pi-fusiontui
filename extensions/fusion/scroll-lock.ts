@@ -19,42 +19,36 @@ export type ScrollLockHandle = {
 
 const PAGE_UP = /\x1b\[(?:5|1;\d+)(?:;\d+)?~/;
 const PAGE_UP_ALT = /\x1b\[\[5~|\x1b\[5[$^]|\x1b\[57421(?:;\d+)?u/;
-const PAGE_DOWN = /\x1b\[(?:6|4;\d+)(?:;\d+)?~/;
-const PAGE_DOWN_ALT = /\x1b\[\[6~|\x1b\[6[$^]|\x1b\[57422(?:;\d+)?u/;
-const END = /\x1b\[(?:F|4~|8~|8[$^]|1;\d+F|57424(?:;\d+)?u)/;
 const SGR_WHEEL_UP = /\x1b\[<6[04];\d+;\d+M/;
-const SGR_WHEEL_DOWN = /\x1b\[<6[15];\d+;\d+M/;
 
-function legacyWheelDirection(data: string): "up" | "down" | undefined {
+/** Bare terminal focus reports (`ESC [ I` / `ESC [ O`) — noise, never a resume intent. */
+const FOCUS_REPORT = /^\x1b\[[IO]$/;
+
+function legacyWheelUp(data: string): boolean {
 	const marker = data.indexOf("\x1b[M");
-	if (marker === -1 || marker + 3 >= data.length) return undefined;
+	if (marker === -1 || marker + 3 >= data.length) return false;
 	const button = (data.charCodeAt(marker + 3) - 32) & 0xff;
-	if ((button & 0x40) === 0) return undefined; // ordinary click/drag
-	return (button & 1) === 0 ? "up" : "down";
+	if ((button & 0x40) === 0) return false; // ordinary click/drag
+	return (button & 1) === 0; // even = wheel up
 }
 
+/** PageUp or a reported wheel-up — the only gestures that pause the live view. */
 function isScrollBackInput(data: string): boolean {
-	return PAGE_UP.test(data) || PAGE_UP_ALT.test(data) || SGR_WHEEL_UP.test(data) || legacyWheelDirection(data) === "up";
+	return PAGE_UP.test(data) || PAGE_UP_ALT.test(data) || SGR_WHEEL_UP.test(data) || legacyWheelUp(data);
 }
-
-function isFollowInput(data: string): boolean {
-	return (
-		(PAGE_DOWN.test(data) || PAGE_DOWN_ALT.test(data)) ||
-		END.test(data) ||
-		SGR_WHEEL_DOWN.test(data) ||
-		legacyWheelDirection(data) === "down"
-	);
-}
-
-const ENABLE_MOUSE_REPORTING = "\x1b[?1000h\x1b[?1006h";
-const DISABLE_MOUSE_REPORTING = "\x1b[?1006l\x1b[?1000l";
 
 /**
- * Pause TUI renders while the user is navigating terminal history. Pi-tui does
- * not expose a scrollback/following state, so this wraps its public render
- * request and the private scheduled render seam. Mouse reporting is enabled
- * only while following; when the first wheel-up arrives it is disabled again,
- * returning subsequent wheel events to the terminal's native scrollback.
+ * Pause TUI renders while the user reads terminal history. Pi-tui does not
+ * expose a scrollback/following state, so this wraps its public render request
+ * and the private scheduled render seam.
+ *
+ * IMPORTANT: this intentionally does NOT enable raw mouse tracking. Turning on
+ * `\x1b[?1000h` hijacks the terminal's native mouse (selection + wheel), and a
+ * stray trackpad scroll during a run would then pause rendering with no obvious
+ * way back — the agent keeps working while the UI looks frozen. Instead we only
+ * pause on an explicit PageUp (or a wheel-up a terminal already reports on its
+ * own), and ANY subsequent keystroke — or the next agent turn — resumes the
+ * live view, so a pause can never strand the UI.
  */
 export function installScrollLock(tui: TUI): ScrollLockHandle {
 	const target = tui as unknown as TuiInternals;
@@ -77,14 +71,6 @@ export function installScrollLock(tui: TUI): ScrollLockHandle {
 	}
 
 	let paused = false;
-	let active = false;
-	let mouseReporting = false;
-	const canReportMouse = process.stdout.isTTY === true;
-	const setMouseReporting = (enabled: boolean) => {
-		if (!canReportMouse || mouseReporting === enabled) return;
-		target.terminal.write(enabled ? ENABLE_MOUSE_REPORTING : DISABLE_MOUSE_REPORTING);
-		mouseReporting = enabled;
-	};
 
 	const installedRequestRender = function (this: TuiInternals, force = false): void {
 		if (paused) return;
@@ -99,36 +85,29 @@ export function installScrollLock(tui: TUI): ScrollLockHandle {
 
 	const pause = () => {
 		paused = true;
-		// Let the terminal handle the rest of the user's wheel/trackpad gesture
-		// in its native scrollback rather than sending more events to Pi.
-		setMouseReporting(false);
 	};
 	const resume = () => {
 		if (!paused) return;
 		paused = false;
-		setMouseReporting(active);
 		// The differ's previous frame is still the last frame actually painted;
 		// resume normally so Pi can append current state without clearing history.
 		target.requestRender();
 	};
 
 	return {
-		setActive(enabled: boolean): void {
-			active = enabled;
-			if (!paused) setMouseReporting(active);
-		},
+		// Kept for API compatibility; raw mouse tracking is deliberately not used.
+		setActive(): void {},
 		handleInput(data: string): ScrollLockInputResult {
 			if (isScrollBackInput(data)) {
 				pause();
-				// Wheel events are only visible while reporting is enabled; consume the
-				// first one so the editor never interprets it as an unknown key.
-				return SGR_WHEEL_UP.test(data) || legacyWheelDirection(data) === "up"
-					? { consume: true }
-					: undefined;
+				// A reported wheel-up would otherwise reach the editor as an unknown
+				// key; consume it. PageUp is left for the editor/app to handle.
+				return SGR_WHEEL_UP.test(data) || legacyWheelUp(data) ? { consume: true } : undefined;
 			}
-			if (paused && isFollowInput(data)) {
+			// Any real keystroke while paused means "I'm done reading" — resume the
+			// live view. Bare focus reports are noise and must not resume.
+			if (paused && data.length > 0 && !FOCUS_REPORT.test(data)) {
 				resume();
-				return undefined;
 			}
 			return undefined;
 		},
@@ -137,8 +116,6 @@ export function installScrollLock(tui: TUI): ScrollLockHandle {
 		isPaused: () => paused,
 		dispose(): void {
 			paused = false;
-			active = false;
-			setMouseReporting(false);
 			if (target.requestRender === installedRequestRender)
 				target.requestRender = originalRequestRender;
 			if (target.doRender === installedDoRender)

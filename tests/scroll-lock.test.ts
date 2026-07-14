@@ -67,4 +67,39 @@ describe("transcript scroll lock", () => {
 		expect(lock.isPaused()).toBe(true);
 		lock.dispose();
 	});
+
+	test("any keystroke resumes a paused view; focus reports do not", async () => {
+		const { terminal, writes } = makeTerminal();
+		const tui = new TUI(terminal);
+		let lines = ["old 1", "old 2"];
+		tui.addChild({ render: () => lines, invalidate() {} });
+		const lock = installScrollLock(tui);
+
+		tui.requestRender(true);
+		await waitForRender(5);
+		lock.handleInput("\x1b[5~"); // PageUp pauses
+		expect(lock.isPaused()).toBe(true);
+
+		// A bare focus report is noise and must not resume.
+		lock.handleInput("\x1b[I");
+		expect(lock.isPaused()).toBe(true);
+
+		const beforeType = writes.length;
+		lines = [...lines, "typed while paused"];
+		lock.handleInput("a"); // any real keystroke resumes
+		expect(lock.isPaused()).toBe(false);
+		await waitForRender();
+		expect(writes.length).toBeGreaterThan(beforeType);
+		lock.dispose();
+	});
+
+	test("does not enable raw mouse tracking (no native-mouse hijack)", () => {
+		const { terminal, writes } = makeTerminal();
+		const tui = new TUI(terminal);
+		const lock = installScrollLock(tui);
+		lock.setActive(true);
+		lock.setActive(false);
+		expect(writes.some((w) => w.includes("\x1b[?1000h"))).toBe(false);
+		lock.dispose();
+	});
 });

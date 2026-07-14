@@ -145,11 +145,13 @@ palette, and the verbatim `toolDisplay.*` strings):
   when inactive), and a **forced full redraw** (`tui.requestRender(true)` —
   pi's own recovery path, reprints the whole session buffer) runs after
   `agent_end`, `model_select`, `thinking_level_select`, and compaction.
-* **Scroll lock** — PageUp (or a reported mouse-wheel-up event) pauses all
-  transcript renders while you read older output; PageDown/End resumes with a
-  single redraw. `/fusion-hold` and `/fusion-follow` explicitly pause/resume
-  when a terminal keeps mouse-wheel scrolling in its own scrollback instead of
-  reporting it to the app.
+* **Scroll lock** — PageUp (or `/fusion-hold`) pauses transcript renders while
+  you read older output; **any keystroke** — or the next agent turn — resumes
+  the live view (`/fusion-follow` and PageDown/End resume explicitly). Scroll
+  lock deliberately does **not** enable raw mouse tracking: hijacking the
+  terminal's native mouse meant a stray trackpad scroll during a run could pause
+  rendering and leave the UI looking frozen while the agent kept working, so
+  wheel scrolling stays native and only PageUp pauses.
 * **Colors** are resolved from your **active Pi theme** (accent, toolTitle,
   diffs, borders…), so the skin follows whatever theme you select — e.g. the
   bundled `evangelion-dark`. When a token can't be resolved it falls back to

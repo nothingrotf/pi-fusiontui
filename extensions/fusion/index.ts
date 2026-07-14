@@ -565,6 +565,9 @@ export default function (pi: ExtensionAPI) {
 		syncInteractive(ctx);
 		updateWorking(ctx);
 		patchToolFallbacks();
+		// A new turn always shows live output — never start it in a paused (frozen)
+		// scroll-lock state left over from the previous turn.
+		footerHandle?.resume();
 		footerHandle?.setActive(true);
 		if (ctx.hasUI && ctx.mode === "tui") startHealing();
 		// A scrub was deferred while the user was composing — the editor just

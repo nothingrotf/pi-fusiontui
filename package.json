@@ -14,7 +14,7 @@
   "bugs": {
     "url": "https://github.com/nothingrotf/pi-fusiontui/issues"
   },
-  "files": ["extensions"],
+  "files": ["extensions", "themes"],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "pi:dev": "${PI_BIN:-pi} --no-extensions -e ./extensions/fusion/index.ts",
@@ -28,7 +28,8 @@
     "@earendil-works/pi-tui": "*"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": ["./extensions"],
+    "themes": ["./themes"]
   },
   "devDependencies": {
     "@commitlint/cli": "^19.6.1",

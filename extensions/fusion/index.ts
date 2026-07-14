@@ -274,6 +274,20 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("fusion-follow", {
+		description: "Resume following the newest transcript output after reading scrollback",
+		handler: async (_args, _ctx) => {
+			if (footerHandle) footerHandle.resume();
+			else requestRender?.();
+		},
+	});
+	pi.registerCommand("fusion-hold", {
+		description: "Pause transcript renders so terminal scrollback can be read safely",
+		handler: async (_args, _ctx) => {
+			footerHandle?.pause();
+		},
+	});
+
 	pi.registerCommand("fusion", {
 		description: "Set the fusiontui footer mode: full, minimal, or adaptive",
 		getArgumentCompletions: (prefix) =>
@@ -515,6 +529,8 @@ export default function (pi: ExtensionAPI) {
 		syncFocusReporting();
 		focusInputParser.reset();
 		unsubscribeInput = ctx.ui.onTerminalInput?.((data) => {
+			const scrollResult = footerHandle?.handleInput(data);
+			if (scrollResult?.consume) return scrollResult;
 			const result = focusInputParser.parse(data);
 			// The editor processes input after this hook; consumePendingScrub must
 			// observe the post-submit empty editor, not the pre-input state.
@@ -548,6 +564,7 @@ export default function (pi: ExtensionAPI) {
 		awaitingToolIds.clear();
 		syncInteractive(ctx);
 		updateWorking(ctx);
+		footerHandle?.setActive(true);
 		if (ctx.hasUI && ctx.mode === "tui") startHealing();
 		// A scrub was deferred while the user was composing — the editor just
 		// emptied (message sent), and the stall is masked by "Thinking…".
@@ -571,6 +588,7 @@ export default function (pi: ExtensionAPI) {
 		awaitingToolIds.clear();
 		syncActivity();
 		stopHealing();
+		footerHandle?.setActive(false);
 		// Aborted tools never fire tool_execution_end — latch their headers solid.
 		stopAllShimmers();
 		syncInteractive(ctx);

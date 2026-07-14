@@ -3,6 +3,11 @@ import { formatCwd } from "./format";
 import type { FusionState } from "./state";
 import type { UsageSnapshot, UsageWindow } from "./usage";
 import { fitLine, sanitizeScalar } from "./render-safe";
+import {
+	installScrollLock,
+	type ScrollLockHandle,
+	type ScrollLockInputResult,
+} from "./scroll-lock";
 import { fg, justify, loadColor } from "./theme";
 
 type Th = Pick<Theme, "fg">;
@@ -65,7 +70,15 @@ function usageSegment(theme: Th, usage: UsageSnapshot | null): string {
 		.join("   ");
 }
 
-export type FooterInstallHandle = { isOwned: () => boolean; token: symbol };
+export type FooterInstallHandle = {
+	isOwned: () => boolean;
+	token: symbol;
+	handleInput: (data: string) => ScrollLockInputResult;
+	setActive: (active: boolean) => void;
+	pause: () => void;
+	resume: () => void;
+	isPaused: () => boolean;
+};
 
 export function installFooter(
 	ctx: ExtensionContext,
@@ -79,8 +92,18 @@ export function installFooter(
 	ownerToken = Symbol("fusion-footer"),
 ): FooterInstallHandle {
 	let owned = true;
-	const handle: FooterInstallHandle = { isOwned: () => owned, token: ownerToken };
+	let scrollLock: ScrollLockHandle | undefined;
+	const handle: FooterInstallHandle = {
+		isOwned: () => owned,
+		token: ownerToken,
+		handleInput: (data) => scrollLock?.handleInput(data),
+		setActive: (active) => scrollLock?.setActive(active),
+		pause: () => scrollLock?.pause(),
+		resume: () => scrollLock?.resume(),
+		isPaused: () => scrollLock?.isPaused() ?? false,
+	};
 	ctx.ui.setFooter((tui, theme, footerData) => {
+		scrollLock = installScrollLock(tui);
 		hooks.setRequestRender((force?: boolean) => tui.requestRender(force), ownerToken);
 		// Viewport resync: pi-tui's differ can desync its row bookkeeping from
 		// the physical screen (implicit scrolls during over-viewport repaints),
@@ -94,6 +117,7 @@ export function installFooter(
 		// Instead: home the cursor, per-row erase+rewrite (EL(2)), then ED(0)
 		// below the content — none of which trigger the save-to-scrollback path.
 		hooks.setResync(() => {
+			if (scrollLock?.isPaused()) return;
 			const t = tui as unknown as {
 				terminal?: { rows?: number; write?: (s: string) => void };
 				previousLines?: unknown;
@@ -157,6 +181,8 @@ export function installFooter(
 		return {
 			dispose: () => {
 				owned = false;
+				scrollLock?.dispose();
+				scrollLock = undefined;
 				unsub();
 				hooks.setRequestRender(undefined, ownerToken);
 				hooks.setResync(undefined, ownerToken);

@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { normalizeSoundValue } from "../extensions/fusion/sound";
 import { formatCwd, formatResetIn } from "../extensions/fusion/format";
 import { parsePorcelain } from "../extensions/fusion/git";
 import { deriveActivity } from "../extensions/fusion/state";
 import { renderBar } from "../extensions/fusion/theme";
 import { FocusInputParser } from "../extensions/fusion/input";
+import { patchToolFallbacks, resetDroidSession, unpatchToolFallbacks } from "../extensions/fusion/droid";
 import {
 	boundedLines,
 	linesFitWidth,
@@ -82,6 +84,37 @@ describe("coherent activity and input", () => {
 		expect(parser.parse("x\x1b")).toEqual({ data: "x" });
 		expect(parser.parse("[I" )).toEqual({ consume: true });
 		expect(focused).toEqual([true, false, true]);
+	});
+});
+
+describe("Fusion transcript skin", () => {
+	test("keeps Edit cards out of Pi's default background box", () => {
+		patchToolFallbacks();
+		try {
+			const component = new ToolExecutionComponent(
+				"edit",
+				"edit-test",
+				{ path: "/tmp/example.ts", old_string: "old", new_string: "new" },
+				{},
+				undefined,
+				{ requestRender() {} } as never,
+				process.cwd(),
+			);
+			component.updateResult({
+				content: [{ type: "text", text: "" }],
+				details: { diff: "@@ -1 +1 @@\\n-old\\n+new" },
+			});
+			const rendered = component.render(80).join("\\n");
+			expect((component as unknown as { getRenderShell(): string }).getRenderShell()).toBe("self");
+			expect(rendered).toContain("Edit");
+			expect(rendered).toContain("Succeeded. File edited.");
+			expect(rendered).toContain("+new");
+			expect(rendered).not.toContain("\\x1b[48;");
+			expect(rendered).not.toContain("╭");
+		} finally {
+			unpatchToolFallbacks();
+			resetDroidSession();
+		}
 	});
 });
 

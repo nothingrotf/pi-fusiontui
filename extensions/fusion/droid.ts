@@ -21,7 +21,9 @@
  * Mechanism: Pi lets extension tools override built-ins by name — same-name
  * `registerTool` with `renderShell: "self"` + `renderCall`/`renderResult`
  * replaces the card visuals while `execute` delegates to the real built-in
- * definitions (exported from the package root). The assistant icon patches
+ * definitions (exported from the package root). The component render seam is
+ * also guarded so a competing definition cannot restore Pi's colored Box. The
+ * assistant icon patches
  * `AssistantMessageComponent.prototype.render` (same module instance as the
  * running app) and is restored on shutdown.
  *
@@ -761,6 +763,8 @@ export function installDroidTools(
 /** Droid `UAT`: `server___tool` → `SERVER: tool`; otherwise the raw name. */
 function genericDisplayName(name: string): string {
 	const safeName = sanitizeScalar(name);
+	const builtin = DISPLAY[safeName.toLowerCase()];
+	if (builtin) return builtin;
 	if (safeName.includes("___")) {
 		const [server, ...rest] = safeName.split("___");
 		const tool = rest.join("___");
@@ -810,7 +814,10 @@ type ToolExecLike = {
 		details?: unknown;
 	};
 	expanded: boolean;
-	isPartial?: boolean;
+	isPartial: boolean;
+	hideComponent?: boolean;
+	imageComponents?: Component[];
+	imageSpacers?: Component[];
 	ui: { requestRender(): void };
 	invalidate(): void;
 };
@@ -864,6 +871,14 @@ function agentSummary(d: AgentDetailsLike, isPartial: boolean): string {
 
 /** Droid header for an arbitrary tool (shimmer while running, solid when done). */
 function genericHeaderComponent(comp: ToolExecLike): Component {
+	const builtin = DISPLAY[comp.toolName.toLowerCase()];
+	if (builtin) {
+		return headerComponent(
+			comp.toolName.toLowerCase(),
+			(comp.args ?? {}) as Record<string, unknown>,
+			comp,
+		);
+	}
 	const id = comp.toolCallId;
 	// A stored result means the call is over — restored transcripts never fire
 	// tool_execution_end, so without this every historical card would subscribe
@@ -925,11 +940,13 @@ function genericResultComponent(comp: ToolExecLike): Component {
 		const text = resultText(result as ResultLike).replace(/\n+$/, "");
 		const all = text ? text.split("\n") : [];
 		const first = all[0] ?? "";
-		const summary = isError
-			? first || "failed"
-			: all.length > 1
-				? `${all.length} lines`
-				: first || "Done";
+		const summary = DISPLAY[comp.toolName.toLowerCase()]
+			? summaryFor(comp.toolName.toLowerCase(), result as ResultLike, isError)
+			: isError
+				? first || "failed"
+				: all.length > 1
+					? `${all.length} lines`
+					: first || "Done";
 		const lines: string[] = [];
 		const arrow = `${R_INDENT}${hex(DROID.muted, `↳ ${summary}`)}`;
 		lines.push(isError ? `${arrow} ${hex(DROID.error, "(error)")}` : arrow);
@@ -959,6 +976,7 @@ function genericResultComponent(comp: ToolExecLike): Component {
 }
 
 type ToolExecProto = {
+	render(width: number): string[];
 	getRenderShell(): string;
 	getCallRenderer(): unknown;
 	getResultRenderer(): unknown;
@@ -976,11 +994,60 @@ let installedGetCall: (() => unknown) | undefined;
 let installedGetResult: (() => unknown) | undefined;
 let installedCallFallback: (() => Component) | undefined;
 let installedResultFallback: (() => Component | undefined) | undefined;
+let originalToolRender: ((width: number) => string[]) | undefined;
+let installedToolRender: ((width: number) => string[]) | undefined;
+
+/**
+ * Render at the component boundary, not only through tool-definition hooks.
+ * Pi's fallback shell is a colored Box and can win when another extension owns
+ * the same tool or patches the renderer after Fusion. Bypassing that shell is
+ * what makes the Droid surface an invariant for Edit and every other tool.
+ */
+function renderDroidTool(comp: ToolExecLike, width: number): string[] {
+	if (comp.hideComponent) return [];
+	const lines = [""];
+	const header = genericHeaderComponent(comp);
+	lines.push(...header.render(width));
+	if (comp.result) {
+		const result = DISPLAY[comp.toolName.toLowerCase()]
+			? resultComponent(
+					comp.toolName.toLowerCase(),
+					comp.result,
+					comp.expanded,
+					comp.result.isError === true,
+				)
+			: genericResultComponent(comp);
+		lines.push(...result.render(width));
+	}
+	for (let i = 0; i < (comp.imageComponents?.length ?? 0); i++) {
+		const spacer = comp.imageSpacers?.[i];
+		if (spacer) lines.push(...spacer.render(width));
+		const image = comp.imageComponents?.[i];
+		if (image) lines.push(...image.render(width));
+	}
+	return lines;
+}
 
 export function patchToolFallbacks(): void {
-	if (installedShell) return;
 	const proto = ToolExecutionComponent.prototype as unknown as ToolExecProto;
+	if (installedShell) {
+		// A later-loaded extension may replace the prototype after session_start;
+		// Fusion owns transcript presentation, so reclaim only our known slots.
+		if (proto.getRenderShell !== installedShell) proto.getRenderShell = installedShell;
+		if (proto.getCallRenderer !== installedGetCall && installedGetCall)
+			proto.getCallRenderer = installedGetCall;
+		if (proto.getResultRenderer !== installedGetResult && installedGetResult)
+			proto.getResultRenderer = installedGetResult;
+		if (proto.createCallFallback !== installedCallFallback && installedCallFallback)
+			proto.createCallFallback = installedCallFallback;
+		if (proto.createResultFallback !== installedResultFallback && installedResultFallback)
+			proto.createResultFallback = installedResultFallback;
+		if (proto.render !== installedToolRender && installedToolRender)
+			proto.render = installedToolRender;
+		return;
+	}
 	if (
+		typeof proto.render !== "function" ||
 		typeof proto.getRenderShell !== "function" ||
 		typeof proto.getCallRenderer !== "function" ||
 		typeof proto.getResultRenderer !== "function" ||
@@ -1020,6 +1087,11 @@ export function patchToolFallbacks(): void {
 		return genericResultComponent(this as ToolExecLike);
 	};
 	proto.createResultFallback = installedResultFallback;
+	originalToolRender = proto.render;
+	installedToolRender = function (this: ToolExecLike, width: number): string[] {
+		return renderDroidTool(this, width);
+	};
+	proto.render = installedToolRender;
 }
 
 export function unpatchToolFallbacks(): void {
@@ -1032,6 +1104,9 @@ export function unpatchToolFallbacks(): void {
 	if (proto.getResultRenderer === installedGetResult && originalGetResult) proto.getResultRenderer = originalGetResult as never;
 	if (proto.createCallFallback === installedCallFallback && originalCallFallback) proto.createCallFallback = originalCallFallback;
 	if (proto.createResultFallback === installedResultFallback && originalResultFallback) proto.createResultFallback = originalResultFallback;
+	if (proto.render === installedToolRender && originalToolRender) proto.render = originalToolRender;
+	originalToolRender = undefined;
+	installedToolRender = undefined;
 	originalShell = undefined;
 	originalGetCall = undefined;
 	originalGetResult = undefined;

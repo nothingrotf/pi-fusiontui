@@ -564,6 +564,7 @@ export default function (pi: ExtensionAPI) {
 		awaitingToolIds.clear();
 		syncInteractive(ctx);
 		updateWorking(ctx);
+		patchToolFallbacks();
 		footerHandle?.setActive(true);
 		if (ctx.hasUI && ctx.mode === "tui") startHealing();
 		// A scrub was deferred while the user was composing — the editor just

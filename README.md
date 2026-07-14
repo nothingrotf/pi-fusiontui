@@ -113,8 +113,10 @@ palette, and the verbatim `toolDisplay.*` strings):
 * **Tool cards** — Pi's built-in `read`/`bash`/`edit`/`write`/`grep`/`find`/`ls`
   are re-registered under the same names with Droid display names
   (Read/Execute/Edit/Create/Grep/Glob/LS), `renderShell: "self"` and custom
-  `renderCall`/`renderResult`; **execution delegates to the genuine built-in
-  definitions** (`createReadToolDefinition` & co., exported by Pi).
+  `renderCall`/`renderResult`; the ToolExecution render boundary also bypasses
+  Pi's colored fallback Box when another definition owns the tool; **execution
+  delegates to the genuine built-in definitions** (`createReadToolDefinition`
+  & co., exported by Pi).
   Registration happens at `session_start`, and any name already owned by
   another extension (e.g. `pi-diff`'s edit/write, `pi-fff`'s grep/find) is
   **skipped with a notice** — that extension keeps its execution behavior and

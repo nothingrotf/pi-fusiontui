@@ -6,7 +6,14 @@ import { parsePorcelain } from "../extensions/fusion/git";
 import { deriveActivity } from "../extensions/fusion/state";
 import { renderBar } from "../extensions/fusion/theme";
 import { FocusInputParser } from "../extensions/fusion/input";
-import { patchToolFallbacks, resetDroidSession, unpatchToolFallbacks } from "../extensions/fusion/droid";
+import {
+	DROID,
+	patchToolFallbacks,
+	resetDroidSession,
+	setPaletteThemeProvider,
+	syncPalette,
+	unpatchToolFallbacks,
+} from "../extensions/fusion/droid";
 import {
 	boundedLines,
 	linesFitWidth,
@@ -84,6 +91,32 @@ describe("coherent activity and input", () => {
 		expect(parser.parse("x\x1b")).toEqual({ data: "x" });
 		expect(parser.parse("[I" )).toEqual({ consume: true });
 		expect(focused).toEqual([true, false, true]);
+	});
+});
+
+describe("Fusion composer palette", () => {
+	test("resolves the idle border from the active accent color", () => {
+		const rgb = (value: string): string => {
+			const [r, g, b] = value.match(/[0-9a-f]{2}/gi)!.map((part) => parseInt(part, 16));
+			return `\x1b[38;2;${r};${g};${b}m`;
+		};
+		const colors: Record<string, string> = {
+			accent: "#123456",
+			border: "#654321",
+			borderMuted: "#111111",
+			warning: "#abcdef",
+		};
+		setPaletteThemeProvider(() => ({
+			getFgAnsi: (token: string) => rgb(colors[token] ?? "#010203"),
+		} as never));
+		try {
+			syncPalette(true);
+			expect(DROID.borderIdle).toBe(colors.accent);
+			expect(DROID.borderWorking).toBe(colors.borderMuted);
+			expect(DROID.borderAwaiting).toBe(colors.warning);
+		} finally {
+			setPaletteThemeProvider(undefined);
+		}
 	});
 });
 

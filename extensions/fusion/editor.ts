@@ -39,7 +39,7 @@ const SPINNER = [
  * conveyed by the spinner row, not the border. The working/awaiting tints are
  * a deliberate fusion deviation, now resolved from the ACTIVE pi theme via
  * the live DROID palette (fallback: droid factory-dark):
- *  - idle     → theme `border`      (droid #878787)
+ *  - idle     → theme `accent`      (droid fallback #d75f00)
  *  - working  → theme `borderMuted` (droid #767676 — the box recedes)
  *  - awaiting → theme `warning`     (droid #ffaf00 — the agent asked YOU)
  */

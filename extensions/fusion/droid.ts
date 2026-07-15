@@ -81,7 +81,7 @@ const FACTORY_DARK = {
 	userSymbol: "#d75f00",
 	userBg: "#262626",
 	// fusion-only editor border tints (droid uses a constant border)
-	borderIdle: "#878787",
+	borderIdle: "#d75f00",
 	borderWorking: "#767676",
 	borderAwaiting: "#ffaf00",
 } as const;
@@ -97,7 +97,7 @@ export type DroidPalette = { -readonly [K in keyof typeof FACTORY_DARK]: string 
  *   toolParam → toolOutput             muted → muted · error → error
  *   diffAdded/Removed → toolDiff*      diffUnchanged → toolDiffContext
  *   diffHeader → mdCode                userBg → userMessageBg (bg token)
- *   borderIdle → border  borderWorking → borderMuted  borderAwaiting → warning
+ *   borderIdle → accent  borderWorking → borderMuted  borderAwaiting → warning
  */
 export const DROID: DroidPalette = { ...FACTORY_DARK };
 
@@ -177,7 +177,7 @@ export function syncPalette(force = false): void {
 	DROID.diffUnchanged = fgHex("toolDiffContext", FACTORY_DARK.diffUnchanged);
 	DROID.userSymbol = fgHex("accent", FACTORY_DARK.userSymbol);
 	DROID.userBg = userBg;
-	DROID.borderIdle = fgHex("border", FACTORY_DARK.borderIdle);
+	DROID.borderIdle = fgHex("accent", FACTORY_DARK.borderIdle);
 	DROID.borderWorking = fgHex("borderMuted", FACTORY_DARK.borderWorking);
 	DROID.borderAwaiting = fgHex("warning", FACTORY_DARK.borderAwaiting);
 }

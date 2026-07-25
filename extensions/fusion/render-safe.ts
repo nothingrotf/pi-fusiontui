@@ -11,7 +11,6 @@ export function normalizeWidth(width: number, max = 10_000): number {
 const TERMINAL_SEQUENCE =
 	/\x1b(?:\][\s\S]*?(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|P[\s\S]*?(?:\x07|\x1b\\)|[()][0-2A-Z])/g;
 const C0_AND_C1 = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
-const C0_AND_C1_NO_ESC = /[\u0000-\u0008\u000B\u000C\u000E-\u001A\u001C-\u001F\u007F-\u009F]/g;
 
 /** Strip terminal controls while retaining ordinary Unicode text. */
 export function sanitizeText(value: unknown): string {
@@ -38,13 +37,20 @@ export function sanitizeLines(value: unknown): string[] {
  * arbitrary OSC payloads, and physical controls from rendered message text.
  */
 export function sanitizeStyledLine(value: string): string {
-	return value
-		.replace(TERMINAL_SEQUENCE, (sequence) =>
-			/^\x1b\[[0-9;]*m$/.test(sequence) || /^\x1b\]133;[ABC]\x07$/.test(sequence)
-				? sequence
-				: "",
-		)
-		.replace(C0_AND_C1_NO_ESC, "");
+	// Walk the sequences instead of two blind passes: an OSC 133 marker ends in
+	// BEL, which a later control-character sweep would eat, leaving an
+	// UNTERMINATED OSC that swallows the text after it in some terminals.
+	// Control characters are only stripped from the text BETWEEN sequences.
+	let out = "";
+	let last = 0;
+	for (const match of value.matchAll(TERMINAL_SEQUENCE)) {
+		const sequence = match[0];
+		out += value.slice(last, match.index).replace(C0_AND_C1, "");
+		if (/^\x1b\[[0-9;]*m$/.test(sequence) || /^\x1b\]133;[ABC]\x07$/.test(sequence))
+			out += sequence;
+		last = match.index + sequence.length;
+	}
+	return out + value.slice(last).replace(C0_AND_C1, "");
 }
 
 /** Fit a complete, already-styled line to the physical terminal width. */

@@ -165,3 +165,21 @@ describe("render safety", () => {
 		expect(linesFitWidth(result, 20)).toBe(true);
 	});
 });
+
+describe("styled-line sanitizer", () => {
+	test("keeps the BEL that terminates an approved OSC 133 marker", () => {
+		const out = sanitizeStyledLine("\x1b]133;A\x07hello");
+		expect(out).toBe("\x1b]133;A\x07hello");
+		expect(out).toContain("\x07");
+	});
+
+	test("still strips a bare BEL and other physical controls from the text", () => {
+		expect(sanitizeStyledLine("a\x07b\x00c")).toBe("abc");
+	});
+
+	test("keeps SGR styling but drops cursor moves, titles and hyperlinks", () => {
+		expect(sanitizeStyledLine("\x1b[31mred\x1b[0m")).toBe("\x1b[31mred\x1b[0m");
+		expect(sanitizeStyledLine("\x1b[10Aup")).toBe("up");
+		expect(sanitizeStyledLine("\x1b]0;title\x07text")).toBe("text");
+	});
+});

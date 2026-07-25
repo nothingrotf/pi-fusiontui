@@ -255,10 +255,12 @@ export function patchUserGutter(): void {
 		const bar = bg(DROID.userSymbol, " ");
 		const pad = bg(DROID.userBg, " ");
 		const out = raw.map((l) => sanitizeStyledLine(`${bar}${pad}${l}`));
+		// End/final first, THEN start: on a single-line prompt both land on the
+		// same row, and shell integration needs A before B/C.
 		if (out.length > 0) {
-			out[0] = OSC133_ZONE_START + out[0];
 			out[out.length - 1] =
 				OSC133_ZONE_END + OSC133_ZONE_FINAL + out[out.length - 1];
+			out[0] = OSC133_ZONE_START + out[0];
 		}
 		return out.map((line) => fitLine(line, w, ""));
 	};

@@ -29,14 +29,70 @@ export type UsageSnapshot = {
 
 const clamp = (v: number) => (Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0);
 /** Both provider payloads expose utilization as a 0-100 percentage. */
-const normalizePercent = (v: unknown) =>
+export const normalizePercent = (v: unknown) =>
 	typeof v === "number" && Number.isFinite(v) ? clamp(v) : 0;
+
+function record(value: unknown): Record<string, unknown> {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+/** `resets_at` is optional and provider-shaped; anything unusable yields no countdown. */
+function resetsIn(value: unknown, toDate: (raw: never) => Date): string | undefined {
+	if (value === undefined || value === null || value === "") return undefined;
+	const date = toDate(value as never);
+	return Number.isFinite(date.getTime()) ? formatResetIn(date) : undefined;
+}
+
+/**
+ * Anthropic `/api/oauth/usage` -> footer windows. Total: an absent, malformed
+ * or hostile payload yields fewer windows, never a throw (L2-04).
+ */
+export function parseClaudeWindows(data: unknown): UsageWindow[] {
+	const root = record(data);
+	const windows: UsageWindow[] = [];
+	const add = (label: string, key: string) => {
+		const window = record(root[key]);
+		if (window.utilization === undefined) return;
+		windows.push({
+			label,
+			usedPercent: normalizePercent(window.utilization),
+			resetsIn: resetsIn(window.resets_at, (raw) => new Date(raw)),
+		});
+	};
+	add("5h", "five_hour");
+	add("wk", "seven_day");
+	return windows;
+}
+
+/**
+ * ChatGPT `wham/usage` -> footer windows. `reset_at` is unix SECONDS here,
+ * unlike Anthropic's ISO string.
+ */
+export function parseCodexWindows(data: unknown): UsageWindow[] {
+	const limits = record(record(data).rate_limit);
+	const windows: UsageWindow[] = [];
+	const add = (label: string, key: string) => {
+		if (!limits[key]) return;
+		const window = record(limits[key]);
+		windows.push({
+			label,
+			usedPercent: normalizePercent(window.used_percent),
+			resetsIn: resetsIn(
+				window.reset_at,
+				(raw) => new Date(typeof raw === "number" ? raw * 1000 : Number.NaN),
+			),
+		});
+	};
+	add("5h", "primary_window");
+	add("wk", "secondary_window");
+	return windows;
+}
 
 /**
  * Run an async operation with a signal that is also cancelled by a deadline.
  * The timeout wraps response body consumption as well as headers (L2-02).
  */
-async function withTimeout<T>(
+export async function withTimeout<T>(
 	parent: AbortSignal | undefined,
 	ms: number,
 	work: (signal: AbortSignal) => Promise<T>,
@@ -143,23 +199,7 @@ async function fetchClaudeUsage(signal?: AbortSignal): Promise<UsageSnapshot> {
 			signal,
 		);
 		if (!res.ok) return { provider, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
-		const record = data && typeof data === "object" ? (data as Record<string, any>) : {};
-		const windows: UsageWindow[] = [];
-		if (record.five_hour?.utilization !== undefined) {
-			windows.push({
-				label: "5h",
-				usedPercent: normalizePercent(record.five_hour.utilization),
-				resetsIn: record.five_hour.resets_at ? formatResetIn(new Date(record.five_hour.resets_at)) : undefined,
-			});
-		}
-		if (record.seven_day?.utilization !== undefined) {
-			windows.push({
-				label: "wk",
-				usedPercent: normalizePercent(record.seven_day.utilization),
-				resetsIn: record.seven_day.resets_at ? formatResetIn(new Date(record.seven_day.resets_at)) : undefined,
-			});
-		}
-		return { provider, windows, fetchedAt: Date.now() };
+		return { provider, windows: parseClaudeWindows(data), fetchedAt: Date.now() };
 	} catch (error) {
 		if (signal?.aborted) throw error;
 		return { provider, windows: [], error: String(error), fetchedAt: Date.now() };
@@ -183,25 +223,7 @@ async function fetchCodexUsage(signal?: AbortSignal): Promise<UsageSnapshot> {
 			signal,
 		);
 		if (!res.ok) return { provider, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
-		const record = data && typeof data === "object" ? (data as Record<string, any>) : {};
-		const windows: UsageWindow[] = [];
-		const pw = record.rate_limit?.primary_window;
-		if (pw) {
-			windows.push({
-				label: "5h",
-				usedPercent: normalizePercent(pw.used_percent),
-				resetsIn: pw.reset_at ? formatResetIn(new Date(pw.reset_at * 1000)) : undefined,
-			});
-		}
-		const sw = record.rate_limit?.secondary_window;
-		if (sw) {
-			windows.push({
-				label: "wk",
-				usedPercent: normalizePercent(sw.used_percent),
-				resetsIn: sw.reset_at ? formatResetIn(new Date(sw.reset_at * 1000)) : undefined,
-			});
-		}
-		return { provider, windows, fetchedAt: Date.now() };
+		return { provider, windows: parseCodexWindows(data), fetchedAt: Date.now() };
 	} catch (error) {
 		if (signal?.aborted) throw error;
 		return { provider, windows: [], error: String(error), fetchedAt: Date.now() };

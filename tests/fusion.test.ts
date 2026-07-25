@@ -136,6 +136,7 @@ describe("Fusion transcript skin", () => {
 			component.updateResult({
 				content: [{ type: "text", text: "" }],
 				details: { diff: "@@ -1 +1 @@\\n-old\\n+new" },
+				isError: false,
 			});
 			const rendered = component.render(80).join("\\n");
 			expect((component as unknown as { getRenderShell(): string }).getRenderShell()).toBe("self");

@@ -34,13 +34,16 @@ function state(overrides: Partial<FusionState> = {}): FusionState {
 	return { ...createState("/Users/dev/projects/pi-fusiontui", "full"), ...overrides };
 }
 
-const usage: UsageSnapshot = {
+const snapshot = (windows: UsageSnapshot["windows"]): UsageSnapshot => ({
 	provider: "anthropic",
-	windows: [
-		{ label: "5h", usedPercent: 3, resetsIn: "3h37m" },
-		{ label: "wk", usedPercent: 92, resetsIn: "1d19h" },
-	],
-};
+	windows,
+	fetchedAt: 0,
+});
+
+const usage: UsageSnapshot = snapshot([
+	{ label: "5h", usedPercent: 3, resetsIn: "3h37m" },
+	{ label: "wk", usedPercent: 92, resetsIn: "1d19h" },
+]);
 
 const busyState = (mode: FooterMode): FusionState =>
 	state({
@@ -186,14 +189,11 @@ describe("footer segments", () => {
 	});
 
 	test("usage segment clamps out-of-range and non-finite percentages", () => {
-		const text = usageSegment(hostileTheme, {
-			provider: "anthropic",
-			windows: [
-				{ label: "lo", usedPercent: -50, resetsIn: "" },
-				{ label: "hi", usedPercent: 4000, resetsIn: "" },
-				{ label: "nan", usedPercent: Number.NaN, resetsIn: "" },
-			],
-		});
+		const text = usageSegment(hostileTheme, snapshot([
+			{ label: "lo", usedPercent: -50, resetsIn: "" },
+			{ label: "hi", usedPercent: 4000, resetsIn: "" },
+			{ label: "nan", usedPercent: Number.NaN, resetsIn: "" },
+		]));
 		expect(text).toContain("lo 0%");
 		expect(text).toContain("hi 100%");
 		expect(text).toContain("nan 0%");
@@ -201,7 +201,7 @@ describe("footer segments", () => {
 
 	test("usage segment is empty without a snapshot or windows", () => {
 		expect(usageSegment(theme, null)).toBe("");
-		expect(usageSegment(theme, { provider: "anthropic", windows: [] })).toBe("");
+		expect(usageSegment(theme, snapshot([]))).toBe("");
 	});
 
 	test("goal segment is empty for a missing or blank status", () => {

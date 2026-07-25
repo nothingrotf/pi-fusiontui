@@ -1,0 +1,25 @@
+name: Setup
+description: Install Bun, restore the install cache, and install dependencies (frozen lockfile, no postinstall scripts).
+
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.3.14
+
+    # Cache Bun's global install cache. Invalidated when bun.lock changes;
+    # restore-keys cover branch/main fallbacks.
+    - name: Restore Bun install cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.bun/install/cache
+        key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+        restore-keys: |
+          bun-install-${{ runner.os }}-
+
+    # --ignore-scripts: the husky `prepare` hook is useless in CI and fails on
+    # Bun's isolated node_modules layout.
+    - name: Install dependencies
+      shell: bash
+      run: bun install --frozen-lockfile --ignore-scripts

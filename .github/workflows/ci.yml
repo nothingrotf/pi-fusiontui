@@ -1,0 +1,110 @@
+name: CI
+
+# Single CI file (jobs inline, hibou-style). Ends with the `Required (CI)` job —
+# the ONLY status check branch protection should pin, since it aggregates the
+# rest.
+#
+# Runs on PRs into `main` AND on pushes to `main`: this repo is pushed to
+# directly, and `release.yml` cuts a release from that same push, so `main`
+# itself has to be verified rather than only PR heads.
+#
+# Docs-only diffs skip the code jobs (the `changes` filter) while
+# `Required (CI)` still passes.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read # dorny/paths-filter lists changed files via the PR API
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'extensions/**'
+              - 'tests/**'
+              - 'themes/**'
+              - 'bun.lock'
+              - 'package.json'
+              - 'tsconfig.json'
+              - '.oxlintrc.json'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+
+  quality:
+    name: Quality
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Themes are valid JSON
+        run: |
+          set -euo pipefail
+          for f in themes/*.json; do
+            bun -e "JSON.parse(await Bun.file(process.argv[1]).text())" "$f"
+            echo "ok: $f"
+          done
+
+  tests:
+    name: Tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+
+      - name: Run test suite
+        run: bun test
+
+  required:
+    # The only required status check in branch protection — aggregates the rest.
+    name: Required (CI)
+    needs: [changes, quality, tests]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate result
+        shell: bash
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+        run: |
+          for r in "$QUALITY_RESULT" "$TESTS_RESULT"; do
+            case "$r" in
+              failure|cancelled) echo "A required job failed: $r"; exit 1 ;;
+            esac
+          done
+          echo "All required jobs passed (or were intentionally skipped)."

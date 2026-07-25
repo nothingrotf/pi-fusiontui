@@ -31,6 +31,7 @@
     "lint:fix": "oxlint --fix",
     "check": "bun run lint && bun run typecheck && bun test",
     "test": "bun test",
+    "test:coverage": "bun test --coverage",
     "release": "semantic-release",
     "release:dry-run": "semantic-release --dry-run",
     "pi:dev": "${PI_BIN:-pi} --no-extensions -e ./extensions/fusion/index.ts",

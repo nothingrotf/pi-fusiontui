@@ -260,11 +260,27 @@ bun install   # runs "prepare" → installs the Husky hook
 `bun.lock` is the only lockfile — `package-lock.json` is gitignored.
 
 ```bash
-bun run lint        # oxlint, warnings are errors
-bun run typecheck   # tsc --noEmit
-bun test            # bun's test runner
-bun run check       # all three, same as CI
+bun run lint            # oxlint, warnings are errors
+bun run typecheck       # tsc --noEmit, covers extensions/ AND tests/
+bun test                # bun's test runner
+bun run test:coverage   # the same run with a coverage table
+bun run check           # lint + typecheck + tests, same as CI
 ```
+
+The suite is behaviour-driven and split by concern, mirroring the modules:
+
+| Area | Tests |
+|---|---|
+| Footer geometry | `tests/footer-rows.test.ts`, `tests/footer.test.ts` |
+| Composer | `tests/editor-compose.test.ts` |
+| Transcript skin | `tests/droid-cards.test.ts`, `tests/droid-patches.test.ts`, `tests/droid-palette.test.ts`, `tests/droid-labels.test.ts`, `tests/droid-shimmer.test.ts` |
+| Boundaries | `tests/usage.test.ts`, `tests/config.test.ts`, `tests/format.test.ts`, `tests/sound.test.ts`, `tests/fusion.test.ts` |
+| Wiring | `tests/index.test.ts`, `tests/commands.test.ts`, `tests/scroll-lock.test.ts` |
+
+Nothing in the suite touches the network, `~/.pi`, or an audio player: the
+provider fetchers are driven with aborted signals, config persistence is
+parameterized onto a temp directory, and playback is exercised through a
+stubbed stdout.
 
 ### Releases
 

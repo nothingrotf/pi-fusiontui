@@ -245,12 +245,43 @@ hook.
 ```
 
 - **types**: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`
-- **scopes**: `editor`, `footer`, `usage`, `git`, `format`, `theme`, `state`, `config`, `deps`, `release`
+- **scopes**: lower-case, free-form (e.g. `editor`, `footer`, `usage`, `droid`, `sound`)
 
 Example: `feat(editor): align autocomplete under the input`
 
 Enable the hook locally:
 
 ```bash
-npm install   # runs "prepare" → installs the Husky hook
+bun install   # runs "prepare" → installs the Husky hook
+```
+
+### Local checks
+
+`bun.lock` is the only lockfile — `package-lock.json` is gitignored.
+
+```bash
+bun run lint        # oxlint, warnings are errors
+bun run typecheck   # tsc --noEmit
+bun test            # bun's test runner
+bun run check       # all three, same as CI
+```
+
+### Releases
+
+CI runs on every PR into `main` and on every push to `main`; `Required (CI)` is
+the aggregate status check to pin in branch protection.
+
+Releases are automated with [semantic-release](https://semantic-release.gitbook.io):
+a push to `main` re-runs `bun run check`, then derives the next version from the
+commit types, updates [CHANGELOG.md](CHANGELOG.md), tags `v<version>` and cuts a
+GitHub Release. `feat` → minor, `fix`/`perf`/`refactor`/`docs`/`build`/`style` →
+patch, `BREAKING CHANGE` → major; `test`/`ci`/`chore` never release.
+
+The package is installed through `pi install`, not npm, so nothing is published
+to the npm registry (`npmPublish: false` in `.releaserc.json`).
+
+Dry-run the next release without touching anything:
+
+```bash
+GITHUB_TOKEN=$(gh auth token) bunx semantic-release --dry-run --no-ci
 ```

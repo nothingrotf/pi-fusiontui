@@ -355,7 +355,7 @@ const ticker = {
 				// Snapshot: a listener may (un)subscribe during its callback —
 				// iterating the live Set would visit listeners added mid-tick
 				// (infinite loop → OOM).
-				for (const l of [...this.listeners]) l();
+				for (const l of Array.from(this.listeners)) l();
 			}, 50);
 		return () => {
 			this.listeners.delete(fn);

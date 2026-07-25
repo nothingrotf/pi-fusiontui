@@ -88,9 +88,6 @@ export default function (pi: ExtensionAPI) {
 	let requestRender: ((force?: boolean) => void) | undefined;
 	// Scroll-safe viewport resync (repaints the visible screen only, no \x1b[3J).
 	let resyncFn: (() => void) | undefined;
-	// True when pi-tui's frame is taller than the viewport — i.e. rows have
-	// scrolled into terminal scrollback, where a viewport resync can't reach them.
-	let frameOverflowsFn: (() => boolean | undefined) | undefined;
 	let usageTimer: ReturnType<typeof setTimeout> | undefined;
 	let usageKickTimer: ReturnType<typeof setTimeout> | undefined;
 	let gitTimer: ReturnType<typeof setInterval> | undefined;
@@ -528,9 +525,6 @@ export default function (pi: ExtensionAPI) {
 			setResync: (fn, owner) => {
 				if (owner === footerToken) resyncFn = fn;
 			},
-			setFrameOverflows: (fn, owner) => {
-				if (owner === footerToken) frameOverflowsFn = fn;
-			},
 			onBranchChange: () => void refreshGit(ctx),
 		}, ownerToken);
 
@@ -702,7 +696,6 @@ export default function (pi: ExtensionAPI) {
 		stopHealing();
 		requestRender = undefined;
 		resyncFn = undefined;
-		frameOverflowsFn = undefined;
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
 		focusInputParser.reset();

@@ -17,7 +17,12 @@
   "files": ["extensions", "themes"],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings",
+    "lint:fix": "oxlint --fix",
+    "check": "bun run lint && bun run typecheck && bun test",
     "test": "bun test",
+    "release": "semantic-release",
+    "release:dry-run": "semantic-release --dry-run",
     "pi:dev": "${PI_BIN:-pi} --no-extensions -e ./extensions/fusion/index.ts",
     "pi:install-local": "${PI_BIN:-pi} install ./ -l",
     "commitlint": "commitlint --edit",
@@ -40,6 +45,7 @@
     "@earendil-works/pi-tui": "^0.81.1",
     "@types/node": "^25.5.2",
     "husky": "^9.1.7",
+    "oxlint": "^1.75.0",
     "typescript": "^6.0.2"
   }
 }

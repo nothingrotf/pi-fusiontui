@@ -86,7 +86,6 @@ export function installFooter(
 	hooks: {
 		setRequestRender: (fn: ((force?: boolean) => void) | undefined, owner: symbol) => void;
 		setResync: (fn: (() => void) | undefined, owner: symbol) => void;
-		setFrameOverflows: (fn: (() => boolean | undefined) | undefined, owner: symbol) => void;
 		onBranchChange: () => void;
 	},
 	ownerToken = Symbol("fusion-footer"),
@@ -157,22 +156,6 @@ export function installFooter(
 				tui.requestRender(true);
 			}
 		}, ownerToken);
-		// Does pi-tui's current frame exceed the visible viewport? Only an
-		// over-viewport repaint scrolls rows off the top into terminal scrollback,
-		// where the in-place resync can never reach them. This is the signal the
-		// orchestrator uses at agent_end to pick the deep clean (full clear +
-		// reprint) over the cheap scrollback-preserving resync.
-		hooks.setFrameOverflows(() => {
-			const t = tui as unknown as {
-				previousLines?: unknown;
-				terminal?: { rows?: number };
-			};
-			if (!Array.isArray(t.previousLines) || !t.terminal ||
-				!Number.isInteger(t.terminal.rows) || (t.terminal.rows ?? 0) <= 0 ||
-				!(t.previousLines as unknown[]).every((line) => typeof line === "string"))
-				return undefined;
-			return t.previousLines.length > (t.terminal.rows ?? 0);
-		}, ownerToken);
 		const unsub = footerData.onBranchChange(() => {
 			hooks.onBranchChange();
 			tui.requestRender();
@@ -186,7 +169,6 @@ export function installFooter(
 				unsub();
 				hooks.setRequestRender(undefined, ownerToken);
 				hooks.setResync(undefined, ownerToken);
-				hooks.setFrameOverflows(undefined, ownerToken);
 			},
 			invalidate() {},
 			render(width: number): string[] {

@@ -4,6 +4,20 @@ All notable changes to this project are documented here. This file is generated
 by [semantic-release](https://semantic-release.gitbook.io) from Conventional
 Commit messages — do not edit it by hand.
 
+## [0.2.1](https://github.com/nothingrotf/pi-fusiontui/compare/v0.2.0...v0.2.1) (2026-07-25)
+
+### 🐛 Bug Fixes
+
+* **droid:** keep OSC 133 markers intact and correctly ordered ([329e268](https://github.com/nothingrotf/pi-fusiontui/commit/329e268965ae3d69fddde1fda937a6f5342cf301))
+
+### ♻️ Refactors
+
+* **droid:** split the 1267-line skin into modules by concern ([27b2e93](https://github.com/nothingrotf/pi-fusiontui/commit/27b2e9384a0a0caea990bf80f8613d05728032c7))
+
+### 📚 Documentation
+
+* document the test layout and add a coverage script ([146aa1c](https://github.com/nothingrotf/pi-fusiontui/commit/146aa1c56ebd863092ae4cba158e6ba16b52ce55))
+
 ## [0.2.0](https://github.com/nothingrotf/pi-fusiontui/compare/v0.1.0...v0.2.0) (2026-07-25)
 
 ### 🚀 New Features

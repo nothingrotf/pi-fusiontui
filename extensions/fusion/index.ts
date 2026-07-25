@@ -27,7 +27,11 @@ import {
 	previewSound,
 	stopSoundPlayback,
 } from "./sound";
-import { FusionEditor } from "./editor";
+import {
+	createFusionEditor,
+	type FusionSkinned,
+	type InnerEditorFactory,
+} from "./editor";
 import {
 	buildContextLabel,
 	contextPercent,
@@ -72,10 +76,13 @@ const isAskTool = (name: string): boolean =>
 export default function (pi: ExtensionAPI) {
 	const state = createState(process.cwd(), loadMode());
 	let droidToolsInstalled = false;
-	let fusionEditor: FusionEditor | undefined;
+	let fusionEditor: FusionSkinned | undefined;
 	let fusionEditorFactory:
-		| ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => FusionEditor)
+		| ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => FusionSkinned)
 		| undefined;
+	// A displaced editor-slot owner being COMPOSED under the droid skin (e.g.
+	// rpiv-core's LaneDockEditor — its DOWN-from-empty lane gesture survives).
+	let foreignEditorFactory: InnerEditorFactory | undefined;
 	let footerHandle: FooterInstallHandle | undefined;
 	let footerToken: symbol | undefined;
 	let requestRender: ((force?: boolean) => void) | undefined;
@@ -363,6 +370,36 @@ export default function (pi: ExtensionAPI) {
 		refresh();
 	};
 
+	// ── Editor-slot defense (compose, don't evict) ────────────────────────
+	// Other extensions can win the single ctx.ui.setEditorComponent slot simply
+	// by having their session_start handler run after ours (observed with
+	// npm:@juicesharp/rpiv-pi >= 2.0.0, whose lane-switcher installs a
+	// LaneDockEditor — a plain CustomEditor subclass, so the composer silently
+	// reverts to Pi's native look while the rest of the fusion skin stays up).
+	// Mirror the patchToolFallbacks reclaim policy — Fusion owns the composer
+	// PRESENTATION — but COMPOSE the displaced owner instead of evicting it:
+	// its factory is captured and rebuilt as the droid skin's inner editor, so
+	// foreign handleInput behavior (rpiv's DOWN-from-empty lane gesture) keeps
+	// working under the fusion bubble. The host preserves editor text/handlers
+	// across the swap (setCustomEditorComponent), and transient surfaces like
+	// ui.custom consoles never occupy this slot, so the reclaim cannot
+	// interrupt them.
+	const FUSION_FACTORY_TAG = Symbol.for("pi-fusiontui.editor-factory");
+	const isFusionFactory = (factory: unknown): boolean =>
+		typeof factory === "function" &&
+		(factory as unknown as Record<symbol, unknown>)[FUSION_FACTORY_TAG] === true;
+	const reclaimEditor = (ctx: ExtensionContext) => {
+		if (!uiActive || !ctx.hasUI || ctx.mode !== "tui" || !fusionEditorFactory) return;
+		const current = ctx.ui.getEditorComponent?.();
+		if (current === fusionEditorFactory) return;
+		// Never treat one of our own (stale-generation) factories as foreign —
+		// wrapping ourselves would double-draw the bubble.
+		if (typeof current === "function" && !isFusionFactory(current)) {
+			foreignEditorFactory = current as InnerEditorFactory;
+		}
+		ctx.ui.setEditorComponent(fusionEditorFactory);
+	};
+
 	const scheduleUsageRefresh = () => {
 		if (usageTimer) clearTimeout(usageTimer);
 		usageTimer = undefined;
@@ -500,19 +537,36 @@ export default function (pi: ExtensionAPI) {
 		// Suppress Pi's loader row — the live status renders above the composer.
 		ctx.ui.setWorkingVisible(false);
 
+		// A cross-session foreign factory closes over the PREVIOUS session's ui —
+		// drop it and re-capture from THIS session's slot (set when another
+		// extension's session_start already ran before ours).
+		foreignEditorFactory = undefined;
+		const displaced = ctx.ui.getEditorComponent?.();
+		if (typeof displaced === "function" && !isFusionFactory(displaced)) {
+			foreignEditorFactory = displaced as InnerEditorFactory;
+		}
 		fusionEditorFactory = (tui, theme, keybindings) => {
 			// interactive-mode never disposes replaced custom editors — keep the
 			// instance so shutdown can release its ticker subscription.
 			fusionEditor?.dispose();
-			fusionEditor = new FusionEditor(tui, theme, keybindings, ctx.ui.theme, () => ({
+			// foreignEditorFactory is read at CALL time: a reclaim that captures a
+			// displaced owner after this closure is created still composes it.
+			fusionEditor = createFusionEditor(tui, theme, keybindings, ctx.ui.theme, () => ({
 				modelLabel: state.modelLabel,
 				effortLabel: state.effortLabel,
 				agent: state.activity.agent,
 				workingLabel: state.activity.workingLabel,
-			}), () => ctx.ui.getEditorComponent?.() === fusionEditorFactory);
+			}), () => ctx.ui.getEditorComponent?.() === fusionEditorFactory, foreignEditorFactory);
 			return fusionEditor;
 		};
+		(fusionEditorFactory as unknown as Record<symbol, unknown>)[FUSION_FACTORY_TAG] = true;
 		ctx.ui.setEditorComponent(fusionEditorFactory);
+		// Later-running session_start handlers (other extensions) may override the
+		// slot during this same emission — re-assert once the emission settles.
+		const editorLife = uiGeneration;
+		setTimeout(() => {
+			if (isLive(editorLife)) reclaimEditor(ctx);
+		}, 1_000);
 
 		// Defer auth/network work until after UI installation; all auth and body
 		// consumption is asynchronous and bounded, so the first paint stays responsive.
@@ -565,6 +619,7 @@ export default function (pi: ExtensionAPI) {
 		syncInteractive(ctx);
 		updateWorking(ctx);
 		patchToolFallbacks();
+		reclaimEditor(ctx);
 		// A new turn always shows live output — never start it in a paused (frozen)
 		// scroll-lock state left over from the previous turn.
 		footerHandle?.resume();
@@ -595,6 +650,7 @@ export default function (pi: ExtensionAPI) {
 		footerHandle?.setActive(false);
 		// Aborted tools never fire tool_execution_end — latch their headers solid.
 		stopAllShimmers();
+		reclaimEditor(ctx);
 		syncInteractive(ctx);
 		void refreshGit(ctx);
 		// requestRender() has no completion callback in pi-tui. The previous
@@ -630,6 +686,7 @@ export default function (pi: ExtensionAPI) {
 		markToolFinished(event.toolCallId);
 		awaitingToolIds.delete(event.toolCallId);
 		workingPhase = "thinking";
+		reclaimEditor(ctx);
 		updateWorking(ctx);
 		onInteractiveAndGit(event, ctx);
 	});
@@ -656,6 +713,7 @@ export default function (pi: ExtensionAPI) {
 		resetDroidSession();
 		fusionEditor?.dispose();
 		fusionEditor = undefined;
+		foreignEditorFactory = undefined;
 		unpatchAssistantIcon();
 		unpatchUserGutter();
 		unpatchToolFallbacks();

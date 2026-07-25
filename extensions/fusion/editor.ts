@@ -101,54 +101,92 @@ function fill(line: string, w: number): string {
 	return `${t}${" ".repeat(Math.max(0, w - visibleWidth(t)))}`;
 }
 
+/** A droid-skinned editor instance — `dispose()` releases the ticker. */
+export type FusionSkinned = CustomEditor & { dispose: () => void };
+
+/** The shape of a foreign `setEditorComponent` factory being composed. */
+export type InnerEditorFactory = (
+	tui: TUI,
+	theme: EditorTheme,
+	keybindings: KeybindingsManager,
+) => unknown;
+
 /**
- * Droid-style "bubble" editor:
+ * Build the droid-style "bubble" composer:
  *  - Pi's native editor only draws a top + bottom rule (two horizontal lines),
  *    so we redraw a full rounded box ╭╮│╰╯ around the editor content.
  *  - The border color encodes the agent activity (idle/working/awaiting).
  *  - The native colored `›` prompt and the in-text cursor block are preserved
  *    (they shift right with the `│ ` rail automatically).
  *  - A right-aligned `model (effort)` meta row floats above the box.
+ *
+ * COMPOSITION: when `innerFactory` is provided (another extension owned the
+ * single editor slot — e.g. rpiv-core's LaneDockEditor, whose handleInput
+ * carries the DOWN-from-empty lane-browser gesture), its editor is constructed
+ * and re-dressed: the skin patches ONLY the instance's `render`/`setPaddingX`,
+ * so the foreign `handleInput` behavior and app keybindings survive untouched
+ * underneath the droid bubble. Falls back to a plain CustomEditor when the
+ * factory is absent, throws, or returns something that isn't editor-shaped.
  */
-export class FusionEditor extends CustomEditor {
-	private readonly uiTheme: Theme;
-	private readonly getMeta: () => EditorMeta;
-	private readonly isCurrent: () => boolean;
-	private unsubscribeTicker: (() => void) | undefined;
-
-	constructor(
-		tui: TUI,
-		theme: EditorTheme,
-		keybindings: KeybindingsManager,
-		uiTheme: Theme,
-		getMeta: () => EditorMeta,
-		isCurrent: () => boolean = () => true,
-	) {
-		super(tui, theme, keybindings, { paddingX: 0 });
-		this.uiTheme = uiTheme;
-		this.getMeta = getMeta;
-		this.isCurrent = isCurrent;
+export function createFusionEditor(
+	tui: TUI,
+	theme: EditorTheme,
+	keybindings: KeybindingsManager,
+	uiTheme: Theme,
+	getMeta: () => EditorMeta,
+	isCurrent: () => boolean = () => true,
+	innerFactory?: InnerEditorFactory,
+): FusionSkinned {
+	let inner: CustomEditor | undefined;
+	if (innerFactory) {
+		try {
+			const candidate = innerFactory(tui, theme, keybindings) as CustomEditor;
+			if (
+				candidate &&
+				typeof candidate.render === "function" &&
+				typeof candidate.handleInput === "function" &&
+				typeof candidate.setPaddingX === "function"
+			) {
+				inner = candidate;
+			}
+		} catch {
+			inner = undefined; // a broken foreign factory must never cost the composer
+		}
 	}
+	inner ??= new CustomEditor(tui, theme, keybindings, { paddingX: 0 });
+	return applyFusionSkin(inner, tui, uiTheme, getMeta, isCurrent);
+}
 
-	/**
-	 * The bubble math assumes zero native padding — but interactive-mode copies
-	 * the user's editorPaddingX setting onto every custom editor right after
-	 * construction (`newEditor.setPaddingX(defaultEditor.getPaddingX())`).
-	 * Lock it at 0 so the droid frame stays consistent.
-	 */
-	override setPaddingX(_padding: number): void {
-		super.setPaddingX(0);
-	}
+/**
+ * Apply the droid skin to ONE editor instance (instance-level patch, never the
+ * prototype — other extensions' editors elsewhere are unaffected).
+ */
+function applyFusionSkin(
+	inner: CustomEditor,
+	tui: TUI,
+	uiTheme: Theme,
+	getMeta: () => EditorMeta,
+	isCurrent: () => boolean,
+): FusionSkinned {
+	const baseRender = inner.render.bind(inner);
+	const baseSetPaddingX = inner.setPaddingX.bind(inner);
+	const baseDispose = (inner as { dispose?: () => void }).dispose?.bind(inner);
 
-	/**
-	 * Release the ticker subscription. interactive-mode does NOT dispose
-	 * replaced custom editors — without this, tearing the editor down while the
-	 * agent is running leaks a 50 ms interval that repaints a dead TUI forever.
-	 */
-	dispose(): void {
-		this.unsubscribeTicker?.();
-		this.unsubscribeTicker = undefined;
-	}
+	let unsubscribeTicker: (() => void) | undefined;
+	// Release the ticker subscription. interactive-mode does NOT dispose
+	// replaced custom editors — without this, tearing the editor down while the
+	// agent is running leaks a 50 ms interval that repaints a dead TUI forever.
+	const releaseTicker = () => {
+		unsubscribeTicker?.();
+		unsubscribeTicker = undefined;
+	};
+
+	// The bubble math assumes zero native padding — but interactive-mode copies
+	// the user's editorPaddingX setting onto every custom editor right after
+	// construction (`newEditor.setPaddingX(defaultEditor.getPaddingX())`).
+	// Lock it at 0 so the droid frame stays consistent.
+	baseSetPaddingX(0);
+	inner.setPaddingX = (_padding: number) => baseSetPaddingX(0);
 
 	/**
 	 * `⠋ Thinking… · ctx 3%` — the live status row above the composer (Droid's
@@ -159,23 +197,22 @@ export class FusionEditor extends CustomEditor {
 	 * viewport, so the editor must keep a CONSTANT height — toggling this row
 	 * on/off is what corrupted the transcript on state changes.
 	 */
-	private statusLine(width: number): string {
-		const meta = this.getMeta();
+	const statusLine = (width: number): string => {
+		const meta = getMeta();
 		const active = meta.agent !== "idle" && meta.workingLabel.length > 0;
 		// Animate only while active; the ticker is ref-counted and self-stops.
-		if (!this.isCurrent()) {
-			this.dispose();
+		if (!isCurrent()) {
+			releaseTicker();
 			return "";
 		}
-		if (active && !this.unsubscribeTicker) {
+		if (active && !unsubscribeTicker) {
 			// Repaint on every 2nd tick (10 fps) — the spinner frame index derives
 			// from tick/2, so intermediate ticks would repaint an identical frame.
-			this.unsubscribeTicker = subscribeTicker(() => {
-				if (tickerTick() % 2 === 0) this.tui.requestRender();
+			unsubscribeTicker = subscribeTicker(() => {
+				if (tickerTick() % 2 === 0) tui.requestRender();
 			});
-		} else if (!active && this.unsubscribeTicker) {
-			this.unsubscribeTicker();
-			this.unsubscribeTicker = undefined;
+		} else if (!active && unsubscribeTicker) {
+			releaseTicker();
 		}
 		if (!active) return "";
 		const frame = SPINNER[Math.floor(tickerTick() / 2) % SPINNER.length];
@@ -188,50 +225,50 @@ export class FusionEditor extends CustomEditor {
 			width,
 			"…",
 		);
-	}
+	};
 
 	/** Keep the editor frame within the actual terminal height on extreme LINES. */
-	private capHeight(lines: string[]): string[] {
-		const rows = normalizeWidth(this.tui.terminal.rows);
+	const capHeight = (lines: string[]): string[] => {
+		const rows = normalizeWidth(tui.terminal.rows);
 		return rows > 0 && lines.length > rows ? lines.slice(-rows) : lines;
-	}
+	};
 
 	/** Right-aligned `model (effort)` meta row floated above the box (constant-height: blank when no model). */
-	private metaRow(width: number): string {
-		const meta = this.getMeta();
+	const metaRow = (width: number): string => {
+		const meta = getMeta();
 		if (!meta.modelLabel || meta.modelLabel === "no-model") return "";
-		const modelPart = fg(this.uiTheme, "muted", meta.modelLabel);
+		const modelPart = fg(uiTheme, "muted", meta.modelLabel);
 		const effortPart = meta.effortLabel
-			? ` ${fg(this.uiTheme, effortColor(meta.effortLabel), `(${meta.effortLabel})`)}`
+			? ` ${fg(uiTheme, effortColor(meta.effortLabel), `(${meta.effortLabel})`)}`
 			: "";
 		const plain = meta.effortLabel
 			? `${meta.modelLabel} (${meta.effortLabel})`
 			: meta.modelLabel;
 		const pad = Math.max(0, width - visibleWidth(plain));
 		return truncateToWidth(`${" ".repeat(pad)}${modelPart}${effortPart}`, width, "…");
-	}
+	};
 
-	render(width: number): string[] {
+	inner.render = (width: number): string[] => {
 		const w = normalizeWidth(width);
-		const status = this.statusLine(w);
-		const metaLine = this.metaRow(w);
+		const status = statusLine(w);
+		const metaLine = metaRow(w);
 		// Narrow terminals still retain the two prelude rows. Dropping them was
 		// the source of a mode-dependent height jump and stale differ rows (L3-04).
 		if (w <= 8) {
-			const compact = super.render(Math.max(1, w));
-			return this.capHeight([
+			const compact = baseRender(Math.max(1, w));
+			return capHeight([
 				status,
 				metaLine,
 				...(compact.length ? compact : [""]).map((line) => fitLine(line, w, "")),
 			]);
 		}
 
-		const meta = this.getMeta();
+		const meta = getMeta();
 		const promptW = visibleWidth(PROMPT) + 1; // chevron + 1 space
 		const textW = Math.max(1, w - 4 - promptW); // `│ ` + prompt + text + ` │`
-		const base = super.render(textW);
+		const base = baseRender(textW);
 		if (base.length < 2) {
-			return this.capHeight([status, metaLine, ...base.map((line) => fitLine(line, w, ""))]);
+			return capHeight([status, metaLine, ...base.map((line) => fitLine(line, w, ""))]);
 		}
 
 		// Split base into [topRule] content [bottomRule] (+ trailing autocomplete).
@@ -253,7 +290,7 @@ export class FusionEditor extends CustomEditor {
 		// budget. Keep the cursor-containing rows at the bottom when trimming;
 		// this is the safest available integration until pi-tui exposes a public
 		// viewport-row callback (L3-05).
-		const terminalRows = normalizeWidth(this.tui.terminal.rows);
+		const terminalRows = normalizeWidth(tui.terminal.rows);
 		const baseBudget = Math.max(1, Math.floor(terminalRows * 0.3) - 2);
 		const availableContentRows = Math.max(0, terminalRows - 4 /* prelude + top/bottom */);
 		const maxContentRows = Math.min(baseBudget, availableContentRows);
@@ -292,6 +329,13 @@ export class FusionEditor extends CustomEditor {
 		const box = [top, ...rows, bottom, ...dropdown];
 		// Constant two-row prelude (status + meta), blank when inactive — the
 		// editor must never change height on agent-state transitions (see above).
-		return this.capHeight([status, metaLine, ...box.map((line) => fitLine(line, w, ""))]);
-	}
+		return capHeight([status, metaLine, ...box.map((line) => fitLine(line, w, ""))]);
+	};
+
+	const skinned = inner as FusionSkinned;
+	skinned.dispose = () => {
+		releaseTicker();
+		baseDispose?.();
+	};
+	return skinned;
 }

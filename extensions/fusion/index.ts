@@ -15,14 +15,9 @@ import {
 	saveMode,
 } from "./config";
 import {
-	BUILTIN_SOUNDS,
-	FOCUS_META,
 	FocusTracker,
 	normalizeSoundValue,
-	SOUND_FOCUS_MODES,
-	SOUND_META,
 	type SoundFocusMode,
-	type SoundValue,
 	playSound,
 	previewSound,
 	stopSoundPlayback,
@@ -52,6 +47,15 @@ import {
 	unpatchToolFallbacks,
 	unpatchUserGutter,
 } from "./droid";
+import {
+	choiceValue,
+	focusChoices,
+	isAskTool,
+	isFocusMode,
+	parseSoundCommand,
+	soundChoices,
+	soundCompletions,
+} from "./commands";
 import { installFooter, type FooterInstallHandle } from "./footer";
 import { readGitStatus } from "./git";
 import {
@@ -64,14 +68,6 @@ import { FocusInputParser } from "./input";
 
 const USAGE_REFRESH_MS = 5 * 60_000;
 const GIT_REFRESH_MS = 30_000;
-
-/**
- * Ask-style tools → the agent is awaiting YOUR input (Droid's second sound
- * trigger, docs/ui/12-sound-notifications-spec.md §2). Matches
- * `ask_user_question`, `ask_user`, `askuser`, anything with `question`.
- */
-const isAskTool = (name: string): boolean =>
-	/(^|_)ask(_|user|$)|question/i.test(name);
 
 export default function (pi: ExtensionAPI) {
 	const state = createState(process.cwd(), loadMode());
@@ -174,99 +170,70 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("fusion-sound", {
 		description:
 			"Configure sounds: completion (off|bell|fx-ok01|fx-ack01|/path.wav), 'ask <sound>' for the awaiting-input sound, 'focus <mode>', or 'test'",
-		getArgumentCompletions: (prefix) => {
-			const p = prefix.trim().toLowerCase();
-			const opts = [
-				...["off", "bell", ...BUILTIN_SOUNDS].map((v) => ({ value: v, label: v })),
-				{ value: "ask", label: "ask <sound> — awaiting-input sound (AskUser)" },
-				{ value: "focus", label: "focus <always|focused|unfocused>" },
-				{ value: "test", label: "test — preview the current sound" },
-			];
-			return opts.filter((o) => o.value.startsWith(p));
-		},
+		getArgumentCompletions: (prefix) => soundCompletions(prefix),
 		handler: async (args, ctx) => {
-			const raw = args.trim();
-			const [head, ...rest] = raw.split(/\s+/);
-			const arg = (head ?? "").toLowerCase();
-
-			// `/fusion-sound test` → preview current sound now.
-			if (arg === "test") {
-				void previewSound(sound.completionSound);
-				ctx.ui.notify(`fusiontui: playing ${sound.completionSound}`, "info");
-				return;
-			}
-
-			// `/fusion-sound ask <value>` → set the awaiting-input sound (Droid's
-			// second trigger: AskUser questions / permission prompts).
-			if (arg === "ask") {
-				let value = rest.join(" ").trim() as SoundValue;
-				if (!value) {
-					const choices = ["off", "bell", ...BUILTIN_SOUNDS].map((v) => {
-						const meta = SOUND_META[v];
-						const marker = v === sound.awaitingInputSound ? " (current)" : "";
-						return `${v} — ${meta?.description ?? v}${marker}`;
-					});
-					const pick = await ctx.ui.select("Select awaiting-input sound", choices);
-					if (!pick) return;
-					value = pick.split(" ")[0] as SoundValue;
-				}
-				const normalized = normalizeSoundValue(value);
-				if (!normalized) {
-					ctx.ui.notify("fusiontui: invalid sound; use a known id or absolute file path", "warning");
-					return;
-				}
-				sound = { ...sound, awaitingInputSound: normalized };
-				saveConfig({ awaitingInputSound: normalized });
-				if (normalized !== "off") void previewSound(normalized);
-				ctx.ui.notify(`fusiontui: awaiting-input sound = ${normalized}`, "info");
-				return;
-			}
-
-			// `/fusion-sound focus <mode>` → set focus policy.
-			if (arg === "focus") {
-				let mode = (rest[0] ?? "").toLowerCase() as SoundFocusMode;
-				if (!(SOUND_FOCUS_MODES as readonly string[]).includes(mode)) {
-					const pick = await ctx.ui.select(
-						"Sound focus mode",
-						SOUND_FOCUS_MODES.map((m) => `${m} — ${FOCUS_META[m].description}`),
-					);
-					if (!pick) return;
-					mode = pick.split(" ")[0] as SoundFocusMode;
-				}
+			const invalid = () =>
+				ctx.ui.notify(
+					"fusiontui: invalid sound; use a known id or absolute file path",
+					"warning",
+				);
+			const applySound = (
+				field: "completionSound" | "awaitingInputSound",
+				raw: string,
+				label: string,
+			) => {
+				const value = normalizeSoundValue(raw);
+				if (!value) return invalid();
+				sound = { ...sound, [field]: value };
+				saveConfig({ [field]: value });
+				if (value !== "off") void previewSound(value);
+				ctx.ui.notify(`fusiontui: ${label} = ${value}`, "info");
+			};
+			const applyFocus = (mode: SoundFocusMode) => {
 				sound = { ...sound, soundFocusMode: mode };
 				saveConfig({ soundFocusMode: mode });
 				syncFocusReporting();
 				ctx.ui.notify(`fusiontui: sound focus mode = ${mode}`, "info");
-				return;
-			}
+			};
 
-			// `/fusion-sound <value>` → set completion sound (bare arg).
-			if (raw.length > 0) {
-				const value = normalizeSoundValue(raw);
-				if (!value) {
-					ctx.ui.notify("fusiontui: invalid sound; use a known id or absolute file path", "warning");
+			const command = parseSoundCommand(args);
+			switch (command.kind) {
+				case "preview":
+					void previewSound(sound.completionSound);
+					ctx.ui.notify(`fusiontui: playing ${sound.completionSound}`, "info");
+					return;
+				case "setAwaiting":
+					return applySound("awaitingInputSound", command.value, "awaiting-input sound");
+				case "setCompletion":
+					return applySound("completionSound", command.value, "completion sound");
+				case "setFocus":
+					return applyFocus(command.mode);
+				case "pickAwaiting": {
+					const pick = choiceValue(
+						await ctx.ui.select(
+							"Select awaiting-input sound",
+							soundChoices(sound.awaitingInputSound),
+						),
+					);
+					if (pick) applySound("awaitingInputSound", pick, "awaiting-input sound");
 					return;
 				}
-				sound = { ...sound, completionSound: value };
-				saveConfig({ completionSound: value });
-				if (value !== "off") void previewSound(value);
-				ctx.ui.notify(`fusiontui: completion sound = ${value}`, "info");
-				return;
+				case "pickFocus": {
+					const pick = choiceValue(await ctx.ui.select("Sound focus mode", focusChoices()));
+					if (isFocusMode(pick)) applyFocus(pick);
+					return;
+				}
+				case "pickCompletion": {
+					const pick = choiceValue(
+						await ctx.ui.select(
+							"Select completion sound",
+							soundChoices(sound.completionSound),
+						),
+					);
+					if (pick) applySound("completionSound", pick, "completion sound");
+					return;
+				}
 			}
-
-			// No args → interactive picker.
-			const choices = ["off", "bell", ...BUILTIN_SOUNDS].map((v) => {
-				const meta = SOUND_META[v];
-				const marker = v === sound.completionSound ? " (current)" : "";
-				return `${v} — ${meta?.description ?? v}${marker}`;
-			});
-			const pick = await ctx.ui.select("Select completion sound", choices);
-			if (!pick) return;
-			const value = pick.split(" ")[0] as SoundValue;
-			sound = { ...sound, completionSound: value };
-			saveConfig({ completionSound: value });
-			if (value !== "off") void previewSound(value);
-			ctx.ui.notify(`fusiontui: completion sound = ${value}`, "info");
 		},
 	});
 

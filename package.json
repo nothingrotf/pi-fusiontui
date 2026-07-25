@@ -43,9 +43,13 @@
     "@earendil-works/pi-ai": "^0.81.1",
     "@earendil-works/pi-coding-agent": "^0.81.1",
     "@earendil-works/pi-tui": "^0.81.1",
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/git": "^11.0.1",
     "@types/node": "^25.5.2",
+    "conventional-changelog-conventionalcommits": "^10.2.1",
     "husky": "^9.1.7",
     "oxlint": "^1.75.0",
+    "semantic-release": "^25.0.8",
     "typescript": "^6.0.2"
   }
 }

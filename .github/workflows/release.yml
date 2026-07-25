@@ -1,0 +1,46 @@
+name: Release
+
+# semantic-release owns the version, the tag, CHANGELOG.md and the GitHub
+# Release. It runs on every push to `main`, but only cuts a release when the
+# commits since the last tag actually warrant one (see `.releaserc.json`).
+#
+# The quality gate is repeated here rather than chained off `ci.yml`: this repo
+# is pushed to directly, so the release must not depend on a workflow that a
+# docs-only path filter can skip.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The release commit itself must not trigger another release.
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - name: Verify before releasing
+        run: bun run check
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bunx semantic-release

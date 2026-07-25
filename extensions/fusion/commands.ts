@@ -1,3 +1,4 @@
+import { FOOTER_MODES, nextMode, type FooterMode } from "./config";
 import {
 	BUILTIN_SOUNDS,
 	FOCUS_META,
@@ -91,6 +92,26 @@ export function focusChoices(): string[] {
 /** The id back out of a picker row; "" when nothing was chosen. */
 export function choiceValue(pick: string | undefined | null): string {
 	return (pick ?? "").trim().split(/\s+/)[0] ?? "";
+}
+
+/**
+ * `/fusion [mode]` — a named mode selects it, anything else (including no
+ * argument) advances the cycle, which is what makes a bare `/fusion` a toggle.
+ */
+export function resolveFooterMode(args: string, current: FooterMode): FooterMode {
+	const arg = args.trim().toLowerCase();
+	return (FOOTER_MODES as readonly string[]).includes(arg)
+		? (arg as FooterMode)
+		: nextMode(current);
+}
+
+/** Completions for `/fusion`, filtered by what has been typed. */
+export function footerModeCompletions(prefix: string): { value: string; label: string }[] {
+	const typed = prefix.trim().toLowerCase();
+	return FOOTER_MODES.filter((mode) => mode.startsWith(typed)).map((mode) => ({
+		value: mode,
+		label: mode,
+	}));
 }
 
 /** Completions for `/fusion-sound`, filtered by what has been typed. */

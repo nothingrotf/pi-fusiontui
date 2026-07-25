@@ -8,7 +8,10 @@ import {
 } from "../extensions/fusion/usage";
 
 const HOUR = 3_600_000;
-const isoIn = (ms: number): string => new Date(Date.now() + ms).toISOString();
+// formatResetIn floors to whole minutes, so a bare offset lands one minute
+// short whenever the test takes a few ms. The half-minute cushion keeps the
+// expected countdown stable without changing which unit is exercised.
+const isoIn = (ms: number): string => new Date(Date.now() + ms + 30_000).toISOString();
 // Round UP: flooring would shave the sub-second remainder off and turn a clean
 // "3h" countdown into "2h59m".
 const unixIn = (ms: number): number => Math.ceil((Date.now() + ms) / 1000);

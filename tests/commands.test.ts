@@ -2,14 +2,17 @@ import { describe, expect, test } from "bun:test";
 import {
 	choiceValue,
 	focusChoices,
+	footerModeCompletions,
 	isAskTool,
 	isFocusMode,
 	parseSoundCommand,
+	resolveFooterMode,
 	soundChoices,
 	soundCompletions,
 	type SoundCommand,
 } from "../extensions/fusion/commands";
 import { BUILTIN_SOUNDS, SOUND_FOCUS_MODES } from "../extensions/fusion/sound";
+import { FOOTER_MODES, type FooterMode } from "../extensions/fusion/config";
 
 describe("isAskTool", () => {
 	test("matches the ask-style tool names that mean 'awaiting your input'", () => {
@@ -141,5 +144,40 @@ describe("soundCompletions", () => {
 
 	test("every completion carries a label", () => {
 		for (const option of soundCompletions("")) expect(option.label.length).toBeGreaterThan(0);
+	});
+});
+
+describe("resolveFooterMode", () => {
+	test("a named mode is selected verbatim, whatever the current one", () => {
+		for (const mode of FOOTER_MODES) {
+			for (const current of FOOTER_MODES) {
+				expect(resolveFooterMode(mode, current)).toBe(mode);
+				expect(resolveFooterMode(` ${mode.toUpperCase()} `, current)).toBe(mode);
+			}
+		}
+	});
+
+	test("no argument advances the cycle, so a bare /fusion toggles", () => {
+		const seen = new Set<string>();
+		let mode: FooterMode = FOOTER_MODES[0]!;
+		for (let i = 0; i < FOOTER_MODES.length; i++) {
+			seen.add(mode);
+			mode = resolveFooterMode("", mode);
+		}
+		expect(seen.size).toBe(FOOTER_MODES.length);
+		expect(mode).toBe(FOOTER_MODES[0]!);
+	});
+
+	test("an unknown argument advances the cycle rather than failing", () => {
+		expect(resolveFooterMode("sideways", "full")).toBe(resolveFooterMode("", "full"));
+	});
+});
+
+describe("footerModeCompletions", () => {
+	test("offers every mode and filters case-insensitively", () => {
+		expect(footerModeCompletions("").map((o) => o.value)).toEqual([...FOOTER_MODES]);
+		expect(footerModeCompletions("MIN").map((o) => o.value)).toEqual(["minimal"]);
+		expect(footerModeCompletions(" a ").map((o) => o.value)).toEqual(["adaptive"]);
+		expect(footerModeCompletions("zzz")).toEqual([]);
 	});
 });

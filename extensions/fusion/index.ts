@@ -5,12 +5,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import {
-	FOOTER_MODES,
-	type FooterMode,
 	type FusionConfig,
 	loadConfig,
 	loadMode,
-	nextMode,
 	saveConfig,
 	saveMode,
 } from "./config";
@@ -50,9 +47,11 @@ import {
 import {
 	choiceValue,
 	focusChoices,
+	footerModeCompletions,
 	isAskTool,
 	isFocusMode,
 	parseSoundCommand,
+	resolveFooterMode,
 	soundChoices,
 	soundCompletions,
 } from "./commands";
@@ -261,18 +260,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("fusion", {
 		description: "Set the fusiontui footer mode: full, minimal, or adaptive",
-		getArgumentCompletions: (prefix) =>
-			FOOTER_MODES.filter((m) => m.startsWith(prefix.trim().toLowerCase())).map(
-				(m) => ({
-					value: m,
-					label: m,
-				}),
-			),
+		getArgumentCompletions: (prefix) => footerModeCompletions(prefix),
 		handler: async (args, ctx) => {
-			const arg = args.trim().toLowerCase();
-			const mode: FooterMode = (FOOTER_MODES as readonly string[]).includes(arg)
-				? (arg as FooterMode)
-				: nextMode(state.mode);
+			const mode = resolveFooterMode(args, state.mode);
 			state.mode = mode;
 			saveMode(mode);
 			refresh();

@@ -120,7 +120,15 @@ export function syncPalette(force = false): void {
 
 export const ANSI_RESET_FG = "\x1b[39m";
 export const ANSI_RESET_BG = "\x1b[49m";
-type ColorMode = "truecolor" | "256color" | "16color" | "plain";
+export type ColorMode = "truecolor" | "256color" | "16color" | "plain";
+
+/** Everything `resolveColorMode` is allowed to look at. */
+export type ColorEnvironment = {
+	noColor: boolean;
+	term: string;
+	trueColor: boolean;
+	themeMode?: string;
+};
 
 function rgbFromHex(color: string): [number, number, number] | undefined {
 	if (!/^#[0-9a-f]{6}$/i.test(color)) return undefined;
@@ -177,22 +185,34 @@ function nearestAnsi16(color: string): number {
 	return best;
 }
 
+/**
+ * Which escape family this terminal gets (L4-09). Pure so every branch is
+ * reachable in tests — `getCapabilities()` reports truecolor on any developer
+ * machine, which otherwise hides the 256/16-color degradation paths.
+ */
+export function resolveColorMode(env: ColorEnvironment): ColorMode {
+	if (env.noColor || env.term === "dumb") return "plain";
+	if (env.trueColor) return "truecolor";
+	if (env.themeMode === "256color") return "256color";
+	if (/16color|ansi/i.test(env.term)) return "16color";
+	return "256color";
+}
+
 function colorMode(): ColorMode {
 	try {
-		if (process.env.NO_COLOR || process.env.TERM === "dumb") return "plain";
-		const capabilities = getCapabilities();
-		if (capabilities.trueColor) return "truecolor";
-		const themeMode = themeProvider?.()?.getColorMode?.();
-		if (themeMode === "256color") return "256color";
-		if (/16color|ansi/i.test(process.env.TERM ?? "")) return "16color";
-		return "256color";
+		return resolveColorMode({
+			noColor: Boolean(process.env.NO_COLOR),
+			term: process.env.TERM ?? "",
+			trueColor: getCapabilities().trueColor,
+			themeMode: themeProvider?.()?.getColorMode?.(),
+		});
 	} catch {
 		return "plain";
 	}
 }
 
-export function ansiFor(color: string, background: boolean): string {
-	const mode = colorMode();
+/** The SGR sequence for `color` in an explicit mode. Empty when uncolorable. */
+export function ansiIn(color: string, background: boolean, mode: ColorMode): string {
 	const rgb = rgbFromHex(color);
 	if (!rgb || mode === "plain") return "";
 	if (mode === "truecolor")
@@ -202,6 +222,10 @@ export function ansiFor(color: string, background: boolean): string {
 	const base = background ? 40 : 30;
 	const code = index < 8 ? base + index : base + 60 + (index - 8);
 	return `\x1b[${code}m`;
+}
+
+export function ansiFor(color: string, background: boolean): string {
+	return ansiIn(color, background, colorMode());
 }
 
 /** Capability-aware foreground from "#rrggbb" (L4-09). */

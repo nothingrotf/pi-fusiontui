@@ -38,8 +38,10 @@ export function headerLabel(tool: string, args: Record<string, unknown>): string
 			return p ? shortPath(p) : "";
 		}
 		case "bash": {
-			const cmd = str(args.command) ?? "";
-			return sanitizeScalar(cmd.split("\n")[0]);
+			// Split BEFORE sanitizing: sanitizeScalar collapses newlines into spaces,
+			// so splitting after it silently put the whole heredoc on the header row.
+			const cmd = typeof args.command === "string" ? args.command : "";
+			return sanitizeScalar(cmd.replace(/\r\n?/g, "\n").split("\n")[0]);
 		}
 		case "grep": {
 			const pat = str(args.pattern);

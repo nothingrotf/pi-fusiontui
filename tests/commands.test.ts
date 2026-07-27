@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
 	choiceValue,
+	DROID_SKIN_ARGS,
+	droidSkinCompletions,
 	focusChoices,
 	footerModeCompletions,
 	isAskTool,
 	isFocusMode,
 	parseSoundCommand,
+	resolveDroidSkin,
 	resolveFooterMode,
 	soundChoices,
 	soundCompletions,
@@ -179,5 +182,36 @@ describe("footerModeCompletions", () => {
 		expect(footerModeCompletions("MIN").map((o) => o.value)).toEqual(["minimal"]);
 		expect(footerModeCompletions(" a ").map((o) => o.value)).toEqual(["adaptive"]);
 		expect(footerModeCompletions("zzz")).toEqual([]);
+	});
+});
+
+describe("resolveDroidSkin", () => {
+	test("a named value is selected verbatim, whatever the current one", () => {
+		for (const current of [true, false]) {
+			expect(resolveDroidSkin("on", current)).toBe(true);
+			expect(resolveDroidSkin(" ON ", current)).toBe(true);
+			expect(resolveDroidSkin("off", current)).toBe(false);
+			expect(resolveDroidSkin(" OFF ", current)).toBe(false);
+		}
+	});
+
+	test("no argument flips the current value, so a bare /fusion-droid toggles", () => {
+		expect(resolveDroidSkin("", true)).toBe(false);
+		expect(resolveDroidSkin("", false)).toBe(true);
+	});
+
+	test("an unknown argument toggles rather than failing", () => {
+		for (const current of [true, false]) {
+			expect(resolveDroidSkin("sideways", current)).toBe(resolveDroidSkin("", current));
+		}
+	});
+});
+
+describe("droidSkinCompletions", () => {
+	test("offers both values and filters case-insensitively", () => {
+		expect(droidSkinCompletions("").map((o) => o.value)).toEqual([...DROID_SKIN_ARGS]);
+		expect(droidSkinCompletions("OF").map((o) => o.value)).toEqual(["off"]);
+		expect(droidSkinCompletions(" o ").map((o) => o.value)).toEqual(["on", "off"]);
+		expect(droidSkinCompletions("zzz")).toEqual([]);
 	});
 });

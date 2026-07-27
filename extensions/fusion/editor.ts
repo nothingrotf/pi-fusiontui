@@ -136,6 +136,7 @@ export function createFusionEditor(
 	getMeta: () => EditorMeta,
 	isCurrent: () => boolean = () => true,
 	innerFactory?: InnerEditorFactory,
+	droidSkin = true,
 ): FusionSkinned {
 	let inner: CustomEditor | undefined;
 	if (innerFactory) {
@@ -154,12 +155,16 @@ export function createFusionEditor(
 		}
 	}
 	inner ??= new CustomEditor(tui, theme, keybindings, { paddingX: 0 });
-	return applyFusionSkin(inner, tui, uiTheme, getMeta, isCurrent);
+	return applyFusionSkin(inner, tui, uiTheme, getMeta, isCurrent, droidSkin);
 }
 
 /**
  * Apply the droid skin to ONE editor instance (instance-level patch, never the
  * prototype — other extensions' editors elsewhere are unaffected).
+ *
+ * With `droidSkin` false the instance keeps ONLY the model/effort meta row and
+ * renders Pi's native editor underneath: no status row, no ticker, no bubble,
+ * no chevron, no padding lock.
  */
 function applyFusionSkin(
 	inner: CustomEditor,
@@ -167,6 +172,7 @@ function applyFusionSkin(
 	uiTheme: Theme,
 	getMeta: () => EditorMeta,
 	isCurrent: () => boolean,
+	droidSkin: boolean,
 ): FusionSkinned {
 	const baseRender = inner.render.bind(inner);
 	const baseSetPaddingX = inner.setPaddingX.bind(inner);
@@ -184,9 +190,12 @@ function applyFusionSkin(
 	// The bubble math assumes zero native padding — but interactive-mode copies
 	// the user's editorPaddingX setting onto every custom editor right after
 	// construction (`newEditor.setPaddingX(defaultEditor.getPaddingX())`).
-	// Lock it at 0 so the droid frame stays consistent.
-	baseSetPaddingX(0);
-	inner.setPaddingX = (_padding: number) => baseSetPaddingX(0);
+	// Lock it at 0 so the droid frame stays consistent. With the skin off there
+	// is no frame to keep consistent, so the user's padding is left alone.
+	if (droidSkin) {
+		baseSetPaddingX(0);
+		inner.setPaddingX = (_padding: number) => baseSetPaddingX(0);
+	}
 
 	/**
 	 * `⠋ Thinking… · ctx 3%` — the live status row above the composer (Droid's
@@ -250,6 +259,14 @@ function applyFusionSkin(
 
 	inner.render = (width: number): string[] => {
 		const w = normalizeWidth(width);
+		// Skin off: Pi's native editor with only the model/effort row floated
+		// above it. statusLine is never called, so no ticker is ever subscribed
+		// and the droid bubble/chevron never render. Height stays constant —
+		// metaRow already returns "" when there is no model.
+		if (!droidSkin) {
+			const native = baseRender(w);
+			return capHeight([metaRow(w), ...native.map((line) => fitLine(line, w, ""))]);
+		}
 		const status = statusLine(w);
 		const metaLine = metaRow(w);
 		// Narrow terminals still retain the two prelude rows. Dropping them was

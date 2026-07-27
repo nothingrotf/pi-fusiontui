@@ -114,6 +114,31 @@ export function footerModeCompletions(prefix: string): { value: string; label: s
 	}));
 }
 
+/** `/fusion-droid` arguments, in cycle order. */
+export const DROID_SKIN_ARGS = ["on", "off"] as const;
+
+/**
+ * `/fusion-droid [on|off]` — a named value selects it, anything else
+ * (including no argument) flips the current one, which is what makes a bare
+ * `/fusion-droid` a toggle. Same convention as `/fusion`; over a two-value
+ * domain "advance the cycle" and "toggle" are the same operation.
+ */
+export function resolveDroidSkin(args: string, current: boolean): boolean {
+	const arg = args.trim().toLowerCase();
+	if (arg === "on") return true;
+	if (arg === "off") return false;
+	return !current;
+}
+
+/** Completions for `/fusion-droid`, filtered by what has been typed. */
+export function droidSkinCompletions(prefix: string): { value: string; label: string }[] {
+	const typed = prefix.trim().toLowerCase();
+	return DROID_SKIN_ARGS.filter((arg) => arg.startsWith(typed)).map((arg) => ({
+		value: arg,
+		label: arg,
+	}));
+}
+
 /** Completions for `/fusion-sound`, filtered by what has been typed. */
 export function soundCompletions(prefix: string): { value: string; label: string }[] {
 	const typed = prefix.trim().toLowerCase();

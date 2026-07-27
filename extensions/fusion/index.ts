@@ -5,6 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import {
+	DEFAULT_CONFIG,
 	type FusionConfig,
 	loadConfig,
 	loadMode,
@@ -46,11 +47,13 @@ import {
 } from "./droid";
 import {
 	choiceValue,
+	droidSkinCompletions,
 	focusChoices,
 	footerModeCompletions,
 	isAskTool,
 	isFocusMode,
 	parseSoundCommand,
+	resolveDroidSkin,
 	resolveFooterMode,
 	soundChoices,
 	soundCompletions,
@@ -71,6 +74,10 @@ const GIT_REFRESH_MS = 30_000;
 export default function (pi: ExtensionAPI) {
 	const state = createState(process.cwd(), loadMode());
 	let droidToolsInstalled = false;
+	// Read ONCE per session in session_start: installDroidTools has no
+	// unregister counterpart, so the skin cannot be taken back mid-session.
+	// Deliberately not part of `sound` — /fusion-sound re-spreads that object.
+	let droidSkin = DEFAULT_CONFIG.droidSkin;
 	let fusionEditor: FusionSkinned | undefined;
 	let fusionEditorFactory:
 		| ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => FusionSkinned)
@@ -270,6 +277,30 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("fusion-droid", {
+		description:
+			"Turn the droid transcript skin on or off (bare /fusion-droid toggles); restart pi to apply",
+		getArgumentCompletions: (prefix) => droidSkinCompletions(prefix),
+		handler: async (args, ctx) => {
+			// Toggle against the PERSISTED value, not the session one: the session
+			// flag is frozen at session_start, so two calls in one session would
+			// otherwise flip to the same value twice. Same warning route as
+			// session_start — an invalid persisted value must not default silently.
+			const current = loadConfig((field) =>
+				ctx.ui.notify(`fusiontui: invalid ${field} config; using default`, "warning"),
+			).droidSkin;
+			const next = resolveDroidSkin(args, current);
+			saveConfig({ droidSkin: next });
+			// "restart pi", not "next session": installDroidTools is a one-shot with
+			// no unregisterTool counterpart, so tool cards registered in this
+			// process survive /new.
+			ctx.ui.notify(
+				`fusiontui: droid skin = ${next ? "on" : "off"} (restart pi to apply)`,
+				"info",
+			);
+		},
+	});
+
 	/** Cheap, synchronous state derived from ctx (model, effort, context, cost). */
 	const syncInteractive = (ctx: ExtensionContext) => {
 		state.cwd = ctx.cwd;
@@ -445,19 +476,31 @@ export default function (pi: ExtensionAPI) {
 		syncInteractive(ctx);
 		void refreshGit(ctx);
 
+		// One config read per session, routed through notify. Hoisted above the
+		// skin install because droidSkin gates it; a second loadConfig call
+		// would warn twice for the same present-but-invalid field.
+		const config = loadConfig((field) =>
+			ctx.ui.notify(`fusiontui: invalid ${field} config; using default`, "warning"),
+		);
+		sound = config;
+		droidSkin = config.droidSkin;
+
 		// Feed the droid skin the ACTIVE pi theme so its palette follows whatever
 		// theme is selected (getter stays live across runtime theme switches).
+		// Unconditional: hex() resolves its color mode through this provider.
 		setPaletteThemeProvider(() => ctx.ui.theme);
 
-		patchAssistantIcon();
-		patchUserGutter();
-		patchToolFallbacks();
+		if (droidSkin) {
+			patchAssistantIcon();
+			patchUserGutter();
+			patchToolFallbacks();
+		}
 
 		// Droid transcript skin: same-name overrides of the built-in tools
 		// (render-only; execution delegates to the genuine built-ins). Registered
 		// post-load — registering during load trips Pi's cross-extension tool
 		// conflict check when another extension owns a name (pi-diff, pi-fff, …).
-		if (!droidToolsInstalled) {
+		if (droidSkin && !droidToolsInstalled) {
 			droidToolsInstalled = true;
 			const ownedByOthers = new Set(
 				pi
@@ -486,7 +529,8 @@ export default function (pi: ExtensionAPI) {
 		}, ownerToken);
 
 		// Suppress Pi's loader row — the live status renders above the composer.
-		ctx.ui.setWorkingVisible(false);
+		// With the skin off there is no status row, so Pi's own loader stays.
+		if (droidSkin) ctx.ui.setWorkingVisible(false);
 
 		// A cross-session foreign factory closes over the PREVIOUS session's ui —
 		// drop it and re-capture from THIS session's slot (set when another
@@ -507,7 +551,7 @@ export default function (pi: ExtensionAPI) {
 				effortLabel: state.effortLabel,
 				agent: state.activity.agent,
 				workingLabel: state.activity.workingLabel,
-			}), () => ctx.ui.getEditorComponent?.() === fusionEditorFactory, foreignEditorFactory);
+			}), () => ctx.ui.getEditorComponent?.() === fusionEditorFactory, foreignEditorFactory, droidSkin);
 			return fusionEditor;
 		};
 		(fusionEditorFactory as unknown as Record<symbol, unknown>)[FUSION_FACTORY_TAG] = true;
@@ -528,9 +572,6 @@ export default function (pi: ExtensionAPI) {
 		}, 0);
 
 		// Focus tracking for focus-sensitive sound modes.
-		sound = loadConfig((field) =>
-			ctx.ui.notify(`fusiontui: invalid ${field} config; using default`, "warning"),
-		);
 		syncFocusReporting();
 		focusInputParser.reset();
 		unsubscribeInput = ctx.ui.onTerminalInput?.((data) => {
@@ -569,7 +610,7 @@ export default function (pi: ExtensionAPI) {
 		awaitingToolIds.clear();
 		syncInteractive(ctx);
 		updateWorking(ctx);
-		patchToolFallbacks();
+		if (droidSkin) patchToolFallbacks();
 		reclaimEditor(ctx);
 		// A new turn always shows live output — never start it in a paused (frozen)
 		// scroll-lock state left over from the previous turn.

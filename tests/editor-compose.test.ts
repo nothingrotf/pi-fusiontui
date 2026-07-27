@@ -147,3 +147,60 @@ describe("composer composition (createFusionEditor)", () => {
 		editor.dispose();
 	});
 });
+
+describe("droidSkin: false", () => {
+	const off = (getMeta: () => EditorMeta) => {
+		const { tui, keybindings } = deps();
+		return createFusionEditor(
+			tui,
+			editorTheme,
+			keybindings,
+			uiTheme,
+			getMeta,
+			() => true,
+			undefined,
+			false,
+		);
+	};
+
+	test("renders Pi's native editor under the meta row, with no bubble", () => {
+		const editor = off(() => idleMeta);
+		const lines = editor.render(60).map(strip);
+		expect(lines[0]).toContain("Fable 5 (High)");
+		expect(lines.some((l) => l.trimStart().startsWith("╭"))).toBe(false);
+		expect(lines.some((l) => l.trimStart().startsWith("╰"))).toBe(false);
+		expect(lines.some((l) => l.includes("│ >"))).toBe(false);
+		editor.dispose();
+	});
+
+	// The status row is the only ticker subscriber; skipping it must also skip
+	// the droid spinner entirely, not just hide it.
+	test("never draws the droid status row, even while the agent is working", () => {
+		const working: EditorMeta = {
+			...idleMeta,
+			agent: "working",
+			workingLabel: "Thinking…",
+		};
+		const editor = off(() => working);
+		const lines = editor.render(60).map(strip);
+		expect(lines.some((l) => l.includes("Thinking…"))).toBe(false);
+		expect(lines[0]).toContain("Fable 5 (High)");
+		editor.dispose();
+	});
+
+	test("keeps a constant height when the model label disappears", () => {
+		let meta: EditorMeta = idleMeta;
+		const editor = off(() => meta);
+		const withModel = editor.render(60).length;
+		meta = { ...idleMeta, modelLabel: "no-model" };
+		expect(editor.render(60).length).toBe(withModel);
+		editor.dispose();
+	});
+
+	test("leaves the user's editor padding alone", () => {
+		const editor = off(() => idleMeta);
+		editor.setPaddingX(4);
+		expect(editor.getPaddingX()).toBe(4);
+		editor.dispose();
+	});
+});

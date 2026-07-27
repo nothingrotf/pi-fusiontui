@@ -5,10 +5,13 @@ import { join } from "node:path";
 import {
 	DEFAULT_CONFIG,
 	FOOTER_MODES,
+	loadConfig,
 	loadConfigFrom,
 	nextMode,
 	readRawFrom,
+	saveConfig,
 	saveConfigTo,
+	setConfigPath,
 	type FooterMode,
 } from "../extensions/fusion/config";
 
@@ -21,6 +24,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	setConfigPath();
 	rmSync(dir, { recursive: true, force: true });
 });
 
@@ -76,7 +80,29 @@ describe("loadConfigFrom", () => {
 			completionSound: "bell",
 			awaitingInputSound: DEFAULT_CONFIG.awaitingInputSound,
 			soundFocusMode: DEFAULT_CONFIG.soundFocusMode,
+			droidSkin: DEFAULT_CONFIG.droidSkin,
 		});
+	});
+
+	// A boolean is the first falsy-capable field: `false` must survive the
+	// ternary AND must not be mistaken for a present-but-invalid value.
+	test("keeps a persisted droidSkin: false instead of falling back to the default", () => {
+		write(JSON.stringify({ droidSkin: false }));
+		expect(loadConfigFrom(path).droidSkin).toBe(false);
+	});
+
+	test("warns for a non-boolean droidSkin and stays silent for a valid false", () => {
+		write(JSON.stringify({ droidSkin: "off" }));
+		const warned: string[] = [];
+		expect(loadConfigFrom(path, (field) => warned.push(field)).droidSkin).toBe(
+			DEFAULT_CONFIG.droidSkin,
+		);
+		expect(warned).toEqual(["droidSkin"]);
+
+		write(JSON.stringify({ droidSkin: false }));
+		const quiet: string[] = [];
+		loadConfigFrom(path, (field) => quiet.push(field));
+		expect(quiet).toEqual([]);
 	});
 
 	// L1-01: an invalid value must be reported, not silently swallowed.
@@ -161,5 +187,30 @@ describe("saveConfigTo", () => {
 			saveConfigTo(path, { mode });
 			expect(loadConfigFrom(path).mode).toBe(mode);
 		}
+	});
+
+	test("round-trips both droidSkin values", () => {
+		for (const droidSkin of [false, true]) {
+			saveConfigTo(path, { droidSkin });
+			expect(loadConfigFrom(path).droidSkin).toBe(droidSkin);
+		}
+	});
+
+	test("writes droidSkin as a JSON boolean without disturbing unknown keys", () => {
+		write(JSON.stringify({ mode: "minimal", theirKey: { a: 1 } }));
+		saveConfigTo(path, { droidSkin: false });
+		expect(read()).toEqual({ mode: "minimal", theirKey: { a: 1 }, droidSkin: false });
+	});
+});
+
+describe("setConfigPath", () => {
+	test("redirects the default wrappers away from ~/.pi and back", () => {
+		const other = join(dir, "other.json");
+		setConfigPath(path);
+		saveConfig({ droidSkin: false });
+		expect(read().droidSkin).toBe(false);
+		expect(loadConfig().droidSkin).toBe(false);
+		setConfigPath(other);
+		expect(loadConfig().droidSkin).toBe(DEFAULT_CONFIG.droidSkin);
 	});
 });

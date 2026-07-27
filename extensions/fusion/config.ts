@@ -21,12 +21,24 @@ export const FOOTER_MODES = ["full", "minimal", "adaptive"] as const;
 export type FooterMode = (typeof FOOTER_MODES)[number];
 
 /**
- * Where the config lives in production. Every reader/writer below takes the
- * path as a parameter and this is only bound in the thin default wrappers, so
- * the persistence rules can be exercised against a temp directory
- * (`os.homedir()` ignores $HOME, so there is no env-var route into it).
+ * Where the config lives in production. This is the DEFAULT only — the thin
+ * wrappers below bind `activePath`, not this constant, so tests can redirect
+ * them through setConfigPath without touching ~/.pi.
  */
 export const CONFIG_PATH = join(homedir(), ".pi", "fusiontui.json");
+
+/**
+ * The path the thin wrappers below actually read and write. Production leaves
+ * it at CONFIG_PATH; tests point it at a temp directory before activating the
+ * extension and restore it in afterEach — the same module-state + exported
+ * setter shape as setPaletteThemeProvider (droid-palette.ts).
+ */
+let activePath = CONFIG_PATH;
+
+/** Point the default wrappers at `path`; omit the argument to restore CONFIG_PATH. */
+export function setConfigPath(path?: string): void {
+	activePath = path ?? CONFIG_PATH;
+}
 
 /** Full persisted config shape for fusiontui. */
 export interface FusionConfig {
@@ -40,6 +52,12 @@ export interface FusionConfig {
 	awaitingInputSound: SoundValue;
 	/** Focus policy for sounds (default: always). */
 	soundFocusMode: SoundFocusMode;
+	/**
+	 * Render the droid transcript skin — tool cards, the assistant icon, the
+	 * user gutter and the composer bubble (default: true). Read once per
+	 * session, so a change only applies after pi restarts.
+	 */
+	droidSkin: boolean;
 }
 
 export const DEFAULT_CONFIG: FusionConfig = {
@@ -47,6 +65,7 @@ export const DEFAULT_CONFIG: FusionConfig = {
 	completionSound: "fx-ok01",
 	awaitingInputSound: "fx-ack01",
 	soundFocusMode: "always",
+	droidSkin: true,
 };
 
 function isFooterMode(value: unknown): value is FooterMode {
@@ -55,6 +74,10 @@ function isFooterMode(value: unknown): value is FooterMode {
 
 function isFocusMode(value: unknown): value is SoundFocusMode {
 	return typeof value === "string" && (SOUND_FOCUS_MODES as readonly string[]).includes(value);
+}
+
+function isBoolean(value: unknown): value is boolean {
+	return typeof value === "boolean";
 }
 
 /** Parsed config object, or `{}` for a missing, unreadable or non-object file. */
@@ -89,7 +112,9 @@ export function loadConfigFrom(
 		? raw.soundFocusMode
 		: DEFAULT_CONFIG.soundFocusMode;
 	if (raw.soundFocusMode !== undefined && !isFocusMode(raw.soundFocusMode)) warnInvalid("soundFocusMode");
-	return { mode, completionSound, awaitingInputSound, soundFocusMode };
+	const droidSkin = isBoolean(raw.droidSkin) ? raw.droidSkin : DEFAULT_CONFIG.droidSkin;
+	if (raw.droidSkin !== undefined && !isBoolean(raw.droidSkin)) warnInvalid("droidSkin");
+	return { mode, completionSound, awaitingInputSound, soundFocusMode, droidSkin };
 }
 
 /** Merge a partial update into the config at `path` (preserves unknown keys). */
@@ -120,12 +145,12 @@ export function saveConfigTo(path: string, patch: Partial<FusionConfig>): void {
 
 /** Load the full config, filling defaults for missing/invalid fields. */
 export function loadConfig(onWarning?: (field: string) => void): FusionConfig {
-	return loadConfigFrom(CONFIG_PATH, onWarning);
+	return loadConfigFrom(activePath, onWarning);
 }
 
 /** Merge a partial update into the persisted config (preserves unknown keys). */
 export function saveConfig(patch: Partial<FusionConfig>): void {
-	saveConfigTo(CONFIG_PATH, patch);
+	saveConfigTo(activePath, patch);
 }
 
 /** Persisted mode, defaulting to "full" when missing or unreadable. */

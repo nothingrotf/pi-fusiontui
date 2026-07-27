@@ -4,6 +4,17 @@ All notable changes to this project are documented here. This file is generated
 by [semantic-release](https://semantic-release.gitbook.io) from Conventional
 Commit messages — do not edit it by hand.
 
+## [0.3.0](https://github.com/nothingrotf/pi-fusiontui/compare/v0.2.1...v0.3.0) (2026-07-27)
+
+### 🚀 New Features
+
+* **droid:** add /fusion-droid to toggle the droid transcript skin ([d5ae42e](https://github.com/nothingrotf/pi-fusiontui/commit/d5ae42ec7cdd85bce8251291d2b2a951c0e813ca))
+* **themes:** add the kaku-dark theme ([4b30d33](https://github.com/nothingrotf/pi-fusiontui/commit/4b30d33e8a28df24a46e2807a47113534df0eec3))
+
+### 📚 Documentation
+
+* **rpiv:** add the droid-skin-toggle pipeline artifacts ([09a483f](https://github.com/nothingrotf/pi-fusiontui/commit/09a483f3118bcb043ca6f19124e8f08b723a43b2))
+
 ## [0.2.1](https://github.com/nothingrotf/pi-fusiontui/compare/v0.2.0...v0.2.1) (2026-07-25)
 
 ### 🐛 Bug Fixes
